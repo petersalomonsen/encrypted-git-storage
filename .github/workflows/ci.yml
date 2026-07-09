@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: egit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # MinIO as an S3-compatible object store. Run via docker (so we can pass the
+      # `server /data` command, which GitHub `services:` can't) and wait for ready.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=$S3_ACCESS_KEY -e MINIO_ROOT_PASSWORD=$S3_SECRET_KEY \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null 2>&1; then
+              echo "MinIO ready"; break
+            fi
+            echo "waiting for MinIO ($i)"; sleep 2
+          done
+
+      - run: npm ci
+
+      # Node test suites: object-store harness, core (crypto/format), cli remote helper.
+      - name: Unit + integration tests (node --test)
+        run: npm test
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # Browser (service worker) + interop scenarios.
+      - name: E2E tests (Playwright)
+        run: npm run test:e2e
+
+      - name: MinIO logs (on failure)
+        if: failure()
+        run: docker logs minio || true

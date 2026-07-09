@@ -1,0 +1,25 @@
+{
+  "name": "encrypted-git-storage",
+  "version": "0.0.0",
+  "description": "Sync a git repository to a dumb object store with the whole repo encrypted client-side — a service worker (browser) + git remote helper (CLI), like near-git-storage but S3-backed and encrypted.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "git-remote-egit": "src/remote-helper/git-remote-egit.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:e2e": "playwright test",
+    "dev": "node src/gateway/proxy.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.0",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>encrypted-git-storage — SW test page</title>
+<!--
+  Test harness page for the service-worker scenario. TODO(next session):
+  - register ../../src/service-worker/sw.js (served under scope /egit/)
+  - load wasm-git (https://github.com/petersalomonsen/wasm-git) into a worker
+  - expose window hooks the Playwright spec drives: setKey(hex), clone(repoId),
+    commitFile(name, content), push(), listWorkingTree()
+  - the SW talks to the gateway proxy (same origin) which fronts MinIO
+-->
+<body>
+  <pre id="log">encrypted-git-storage SW test page — not wired yet (see TODOs)</pre>
+  <script type="module">
+    // TODO: register SW, boot wasm-git, wire window.* test hooks.
+  </script>
+</body>
