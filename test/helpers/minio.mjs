@@ -41,7 +41,13 @@ export async function ensureBucket(client = makeClient(), bucket = S3_BUCKET) {
     try {
         await client.send(new HeadBucketCommand({ Bucket: bucket }));
     } catch {
-        await client.send(new CreateBucketCommand({ Bucket: bucket }));
+        try {
+            await client.send(new CreateBucketCommand({ Bucket: bucket }));
+        } catch (e) {
+            // Test files run in parallel; on a fresh store several race to create
+            // the bucket and the losers get 409 — that still means "bucket exists".
+            if (!['BucketAlreadyOwnedByYou', 'BucketAlreadyExists'].includes(e?.Code ?? e?.name)) throw e;
+        }
     }
 }
 
