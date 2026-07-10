@@ -15,7 +15,9 @@
     const logEl = document.getElementById('log');
     const log = (s) => { logEl.textContent += `\n${s}`; };
 
-    const reg = await navigator.serviceWorker.register('/src/service-worker/sw.js', { type: 'module', scope: '/' });
+    // ?sw=/dist/sw.js lets specs exercise the bundled build instead of src.
+    const swUrl = new URLSearchParams(location.search).get('sw') ?? '/src/service-worker/sw.js';
+    const reg = await navigator.serviceWorker.register(swUrl, { type: 'module', scope: '/' });
     await navigator.serviceWorker.ready;
     // A brand-new registration only controls the page after claim; wait for it.
     if (!navigator.serviceWorker.controller) {

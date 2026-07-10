@@ -35,9 +35,12 @@ jobs:
             echo "waiting for MinIO ($i)"; sleep 2
           done
 
+      # npm ci runs `prepare` → esbuild bundles dist/sw.js (also exercised by the
+      # packaging test and the dist-sw e2e spec).
       - run: npm ci
 
-      # Node test suites: object-store harness, core (crypto/format), cli remote helper.
+      # Node test suites: object-store harness, core, cli remote helper,
+      # smart-HTTP vs real git, package consumability.
       - name: Unit + integration tests (node --test)
         run: npm test
 

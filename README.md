@@ -13,15 +13,89 @@ service-worker + remote-helper shape, but the packfiles and refs manifest are
 AES-256-GCM encrypted with a client-held key, and the backend is object storage
 instead of the NEAR blockchain.
 
-> Status: **scaffold.** The object-store test harness runs; the git/encryption
-> plumbing is TODO. See [`CLAUDE.md`](./CLAUDE.md) for the design, build order, and
-> agent context, and [`docs/design.md`](./docs/design.md) for detail.
+> Status: **working.** Both transports round-trip against MinIO in CI — including
+> browser↔CLI interop with multi-MB binaries, force-pushes, and client-side
+> compaction/GC. See [`docs/design.md`](./docs/design.md) for the format and
+> design detail, [`CLAUDE.md`](./CLAUDE.md) for agent context.
 
 ## Why
 
 Built so apps can back up sensitive data to an untrusted server zero-knowledge.
 Origin/spec: `arizas/Ariz-Portfolio` issues **#76** (this design) and **#75** (the
 confidential-transactions consumer).
+
+## Consuming
+
+Install as a git dependency (no npm registry publish yet):
+
+```sh
+npm install github:petersalomonsen/encrypted-git-storage#v0.1.0
+```
+
+npm runs the package's `prepare` script on git installs, so the bundled service
+worker `dist/sw.js` is built for you inside `node_modules`. (In a plain checkout,
+`npm install` does the same; `npm run build` rebuilds it.)
+
+### Gateway (Node)
+
+```js
+import { createProxy } from 'encrypted-git-storage/gateway';
+
+// S3 client + bucket from env (S3_ENDPOINT, S3_BUCKET, …) — or pass your own:
+// createProxy({ s3, bucket, auth: (req) => authenticatedRepoIdOrNull(req) })
+createProxy().listen(8080);
+```
+
+The default `auth` is a test stub (`x-repo-id` header). Replace it — that's where
+Ariz-Portfolio plugs in NEP-413.
+
+### Browser (service worker + wasm-git)
+
+Serve `node_modules/encrypted-git-storage/dist/sw.js` from your app (it's a
+single self-contained ESM file) and register it; hand it the repo key, then point
+[wasm-git](https://github.com/petersalomonsen/wasm-git) at `/egit/<repoId>`:
+
+```js
+await navigator.serviceWorker.register('/sw.js', { type: 'module', scope: '/' });
+await navigator.serviceWorker.ready;
+
+// give the SW the client-held AES key for this repo (MessageChannel ack)
+const ch = new MessageChannel();
+const ack = new Promise((res) => { ch.port1.onmessage = res; });
+navigator.serviceWorker.controller.postMessage(
+  { type: 'egit-set-key', repoId, keyHex }, [ch.port2]);
+await ack;
+
+// wasm-git then clones/pushes over ordinary git smart HTTP:
+//   http://<your-origin>/egit/<repoId>   (SW ⇄ gateway at /store/<repoId>)
+```
+
+The SW expects the gateway on the same origin under `/store`. See
+[`test/e2e/page`](test/e2e/page) for a complete working page + worker.
+
+### CLI
+
+```sh
+npm install -g github:petersalomonsen/encrypted-git-storage#v0.1.0  # puts git-remote-egit on PATH
+export EGIT_KEY=<64 hex chars>   # the 32-byte repo key
+
+git clone egit::https://gateway.example.com/store/<repoId>
+git push  egit::https://gateway.example.com/store/<repoId> main
+
+git-remote-egit --compact <gateway>/store/<repoId>   # merge packs (no git needed — browser can too)
+git-remote-egit --gc      <gateway>/store/<repoId>   # drop unreachable objects, redeltify
+git-remote-egit --prune   <gateway>/store/<repoId>   # sweep orphaned packs (age-guarded)
+```
+
+### Core primitives
+
+```js
+import { encrypt, decrypt, isEncrypted, makeStoreClient, compact }
+  from 'encrypted-git-storage/core';
+```
+
+Everything under `/core` is environment-agnostic (WebCrypto + fetch): the same
+code runs in the service worker, the browser, and Node.
 
 ## Layout
 
@@ -43,8 +117,8 @@ npm install
 docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   minio/minio server /data
 
-npm test           # node --test: core crypto + object-store harness (+ cli when built)
-npm run test:e2e   # Playwright: service-worker + interop (when built)
+npm test           # node --test: core, storage harness, CLI + smart-HTTP (real git), packaging
+npm run test:e2e   # Playwright: wasm-git behind the service worker + browser↔CLI interop
 ```
 
 Without a reachable store the object-store tests **skip** (they don't fail). CI

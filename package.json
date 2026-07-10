@@ -1,16 +1,32 @@
 {
   "name": "encrypted-git-storage",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Sync a git repository to a dumb object store with the whole repo encrypted client-side — a service worker (browser) + git remote helper (CLI), like near-git-storage but S3-backed and encrypted.",
   "type": "module",
   "license": "MIT",
+  "repository": "github:petersalomonsen/encrypted-git-storage",
   "engines": {
     "node": ">=22"
   },
   "bin": {
     "git-remote-egit": "src/remote-helper/git-remote-egit.js"
   },
+  "files": [
+    "src",
+    "dist",
+    "docs/design.md"
+  ],
+  "exports": {
+    ".": "./src/core/index.js",
+    "./core": "./src/core/index.js",
+    "./gateway": "./src/gateway/proxy.js",
+    "./service-worker": "./src/service-worker/sw.js",
+    "./dist/sw.js": "./dist/sw.js",
+    "./package.json": "./package.json"
+  },
   "scripts": {
+    "build": "esbuild src/service-worker/sw.js --bundle --format=esm --outfile=dist/sw.js --log-level=warning",
+    "prepare": "npm run build",
     "test": "node --test 'test/**/*.test.mjs'",
     "test:e2e": "playwright test",
     "dev": "node src/gateway/proxy.js"
@@ -21,6 +37,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
+    "esbuild": "^0.28.1",
     "wasm-git": "^0.0.16"
   }
 }
