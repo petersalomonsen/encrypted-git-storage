@@ -5,13 +5,13 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "git-remote-egit": "src/remote-helper/git-remote-egit.js"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test 'test/**/*.test.mjs'",
     "test:e2e": "playwright test",
     "dev": "node src/gateway/proxy.js"
   },
@@ -20,6 +20,7 @@
     "express": "^4.21.2"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.0"
+    "@playwright/test": "^1.55.0",
+    "wasm-git": "^0.0.16"
   }
 }

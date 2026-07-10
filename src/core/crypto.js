@@ -49,3 +49,9 @@ export function isEncrypted(bytes) {
     const b = new Uint8Array(bytes);
     return b.length >= MAGIC.length && MAGIC.every((m, i) => b[i] === m);
 }
+
+/** SHA-256 as lowercase hex — used for plaintext-pack identities in the manifest. */
+export async function sha256hex(bytes) {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}

@@ -60,37 +60,60 @@ of packs, each pack's size, and push timing.
 ```
 src/
   core/            shared, backend- and environment-agnostic
-    crypto.js        AES-256-GCM encrypt/decrypt; key handling            [TODO]
-    format.js        pack + refs-manifest (de)serialization + versioning  [TODO]
+    crypto.js        AES-256-GCM encrypt/decrypt; key handling            [DONE]
+    format.js        refs-manifest (de)serialization + push helpers       [DONE]
+    pktline.js       git pkt-line framing (protocol v0)                   [DONE]
+    packcat.js       merge append-only packs into ONE valid pack          [DONE]
+    store-client.js  gateway client (refs CAS + packs), fetch-based       [DONE]
+    smart-http.js    git smart-HTTP served off the encrypted store        [DONE]
+    manifest-io.js   load/save the encrypted manifest via a store client  [DONE]
+    maintenance.js   compact (browser-capable) / replacePacks / prune     [DONE]
   service-worker/
-    sw.js            intercept git smart-HTTP -> core -> store client     [TODO]
+    sw.js            fetch-event plumbing around core/smart-http.js       [DONE]
   remote-helper/
-    git-remote-egit.js   git remote-helper protocol (stdin/stdout)        [TODO]
+    git-remote-egit.js   git remote-helper protocol (stdin/stdout)        [DONE]
   gateway/
-    proxy.js         thin auth proxy in front of S3 (stub auth here;      [PARTIAL]
+    proxy.js         thin auth proxy in front of S3 (stub auth here;      [DONE]
                      Ariz replaces stub auth with NEP-413). Also the
                      S3 client wrapper (put/get/list/CAS).
 test/
-  storage/         REAL passing tests: object-store harness vs MinIO      [START HERE]
-  e2e/             Playwright: service-worker scenario                    [fixme]
-  cli/             git + git-remote-egit scenario                         [todo]
-  interop/         browser<->CLI cross round-trip                         [todo]
-  helpers/         MinIO client + fixtures
+  storage/         object-store harness vs MinIO (put/get/list/CAS)       [passing]
+  core/            crypto + format + pktline + packcat unit tests         [passing]
+  cli/             git + git-remote-egit + proxy + MinIO scenario         [passing]
+  gateway/         REAL git CLI over smart HTTP (the SW's protocol        [passing]
+                   logic via a node adapter) + cross-transport interop
+  e2e/             Playwright: wasm-git behind the SW (+ server.mjs,      [passing]
+                   page/ with the module worker driving wasm-git)
+  interop/         browser<->CLI cross round-trip with repo growth       [passing]
+  helpers/         MinIO client + smart-server adapter + fixtures
 docs/design.md     full design (mirrors Ariz #76) + format spec
 .github/workflows/ci.yml   MinIO + Playwright + node tests
 ```
 
 ## Build order (TDD)
 
-1. **`test/storage`** already passes and proves the CI object-storage harness
-   (MinIO put/get/list/delete, and the create-if-absent conditional write used
-   for refs-CAS). Keep it green.
-2. **`src/core/crypto.js` + `format.js`** — the encrypted pack + refs format. Unit-test round-trips.
-3. **`src/gateway/proxy.js`** S3 wrapper (put/get/list + CAS on `refs`).
-4. **`src/remote-helper/git-remote-egit.js`** — make `test/cli` pass first (simplest to drive: real `git` + a Node helper + MinIO).
-5. **`src/service-worker/sw.js`** — make `test/e2e` (Playwright) pass.
-6. **`test/interop`** — browser push → CLI clone decrypts, and vice-versa. This is the acceptance test.
-7. Add a **ciphertext assertion**: read a pack straight from MinIO and assert it is *not* a valid git pack (zero-knowledge guarantee).
+1. ✅ **`test/storage`** passes and proves the CI object-storage harness
+   (MinIO put/get/list/delete, and conditional writes — both `If-None-Match: *`
+   and `If-Match` — used for refs-CAS). Keep it green.
+2. ✅ **`src/core/crypto.js` + `format.js`** — the encrypted pack + refs format. Unit-tested round-trips.
+3. ✅ **`src/gateway/proxy.js`** S3 wrapper (put/get/list + CAS on `refs`).
+4. ✅ **`src/remote-helper/git-remote-egit.js`** — `test/cli` passes (real `git` + the Node helper + proxy + MinIO), including the ciphertext (zero-knowledge) assertion and stale-push rejection.
+5. ✅ **`src/service-worker/sw.js`** — `test/e2e` (Playwright) passes: wasm-git (OPFS auto-loader,
+   JSPI variant in CI chromium) in a module worker, all git smart-HTTP intercepted by the SW.
+   The protocol logic lives in `src/core/smart-http.js` and is ALSO driven by the real git CLI
+   in `test/gateway` via the node adapter (`test/helpers/smart-server.mjs`) — debug protocol
+   issues there first, it's much faster than the browser loop.
+6. ✅ **`test/interop`** — browser↔CLI both directions with repo growth (multiple commits from
+   each side, ~3MB binaries verified by hash, incremental fetch, one pack per push).
+7. ✅ Ciphertext assertions on every path (`test/cli`, `test/gateway`, `test/e2e`, `test/interop`):
+   packs read straight from MinIO are never valid git packs and leak no ref names.
+
+All build-order steps are done, plus hardening: force-push/history-rewrite
+semantics (both transports), pack compaction (`git-remote-egit --compact`, also
+runnable from the browser), reachability GC (`--gc`), orphan pruning (`--prune`),
+and tamper-detection tests (GCM). See docs/design.md "Maintenance" for the ops
+and their CAS-safety story; remaining open items are listed there (packaging,
+auto-compaction policy, optional Rust helper).
 
 ## Key references
 
@@ -103,5 +126,5 @@ docs/design.md     full design (mirrors Ariz #76) + format spec
 ## Conventions
 
 - Node ESM. `npm test` runs the node test suites; `npm run test:e2e` runs Playwright.
-- Keep `src/core` free of Node- or browser-only APIs so both the SW and the CLI helper share it (use WebCrypto — available in Node 20+ as `globalThis.crypto` and in the browser/SW).
+- Keep `src/core` free of Node- or browser-only APIs so both the SW and the CLI helper share it (use WebCrypto — available in Node as `globalThis.crypto` and in the browser/SW). Node ≥22 (`node --test` glob patterns need ≥21; Node 20 is EOL).
 - No secrets in the repo. MinIO test creds are the well-known `minioadmin` dev defaults, CI-only.

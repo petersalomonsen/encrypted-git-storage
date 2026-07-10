@@ -13,11 +13,8 @@
 //     generation: <int>   // bumped each push; used for compare-and-set
 //   }
 //
-// TODO(next session):
-//  - serializeManifest(manifest) -> Uint8Array   (JSON is fine to start)
-//  - parseManifest(Uint8Array)   -> manifest
-//  - helpers to add a pack, advance a ref, bump generation
-//  - keep this backend- and env-agnostic (no Node/browser-only APIs)
+// Backend- and env-agnostic: shared verbatim by the service worker and the CLI
+// remote helper (no Node/browser-only APIs).
 
 export const MANIFEST_VERSION = 1;
 
@@ -30,5 +27,34 @@ export function serializeManifest(manifest) {
 }
 
 export function parseManifest(bytes) {
-    return JSON.parse(new TextDecoder().decode(bytes));
+    const manifest = JSON.parse(new TextDecoder().decode(bytes));
+    if (manifest.version !== MANIFEST_VERSION) {
+        throw new Error(`unsupported manifest version ${manifest.version} (expected ${MANIFEST_VERSION})`);
+    }
+    return manifest;
+}
+
+/** First free pack index (packs are append-only, one per push). */
+export function nextPackIndex(manifest) {
+    return manifest.packs.reduce((max, p) => Math.max(max, p.n + 1), 0);
+}
+
+/**
+ * One push applied to a manifest → a NEW manifest with `generation` bumped.
+ *  - refUpdates: { "<refname>": "<sha>" | null }  (null deletes the ref)
+ *  - pack:       { n, sha, size } | null          (null for ref-only updates)
+ */
+export function advanceManifest(manifest, { refUpdates = {}, pack = null } = {}) {
+    const refs = { ...manifest.refs };
+    for (const [name, sha] of Object.entries(refUpdates)) {
+        if (sha === null) delete refs[name];
+        else refs[name] = sha;
+    }
+    const packs = pack ? [...manifest.packs, pack] : [...manifest.packs];
+    return { version: MANIFEST_VERSION, refs, packs, generation: manifest.generation + 1 };
+}
+
+/** Packs sorted by index — the order fetch must replay them (thin-pack bases). */
+export function packsInOrder(manifest) {
+    return [...manifest.packs].sort((a, b) => a.n - b.n);
 }

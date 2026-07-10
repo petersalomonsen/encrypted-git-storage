@@ -2,16 +2,60 @@
 <meta charset="utf-8" />
 <title>encrypted-git-storage — SW test page</title>
 <!--
-  Test harness page for the service-worker scenario. TODO(next session):
-  - register ../../src/service-worker/sw.js (served under scope /egit/)
-  - load wasm-git (https://github.com/petersalomonsen/wasm-git) into a worker
-  - expose window hooks the Playwright spec drives: setKey(hex), clone(repoId),
-    commitFile(name, content), push(), listWorkingTree()
-  - the SW talks to the gateway proxy (same origin) which fronts MinIO
+  Test harness page for the service-worker + wasm-git scenario.
+  - registers /src/service-worker/sw.js (module SW, scope /)
+  - boots wasm-git (OPFS auto-loader) in a module worker (worker.js)
+  - exposes window.egit hooks that the Playwright specs drive
+  The SW answers git smart-HTTP under /egit/<repoId>/ from the encrypted store
+  behind the gateway proxy at /store (same origin, fronting MinIO).
 -->
 <body>
-  <pre id="log">encrypted-git-storage SW test page — not wired yet (see TODOs)</pre>
+  <pre id="log">encrypted-git-storage SW test page</pre>
   <script type="module">
-    // TODO: register SW, boot wasm-git, wire window.* test hooks.
+    const logEl = document.getElementById('log');
+    const log = (s) => { logEl.textContent += `\n${s}`; };
+
+    const reg = await navigator.serviceWorker.register('/src/service-worker/sw.js', { type: 'module', scope: '/' });
+    await navigator.serviceWorker.ready;
+    // A brand-new registration only controls the page after claim; wait for it.
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((res) => navigator.serviceWorker.addEventListener('controllerchange', res, { once: true }));
+    }
+    log('service worker active + controlling');
+
+    let worker, nextId = 0, pending = new Map();
+    function bootWorker() {
+      worker = new Worker('/worker.js', { type: 'module' });
+      worker.onmessage = (e) => {
+        const { id, result, error } = e.data;
+        const p = pending.get(id);
+        if (!p) return;
+        pending.delete(id);
+        error ? p.reject(new Error(error)) : p.resolve(result);
+      };
+    }
+    bootWorker();
+
+    const call = (op, args = {}) => new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ id, op, args });
+    });
+
+    window.egit = {
+      // hand the AES key for a repo to the service worker (MessageChannel ack)
+      async setKey(repoId, keyHex) {
+        const ch = new MessageChannel();
+        const ack = new Promise((res) => { ch.port1.onmessage = res; });
+        navigator.serviceWorker.controller.postMessage(
+          { type: 'egit-set-key', repoId, keyHex }, [ch.port2]);
+        await ack;
+        log(`key set for ${repoId}`);
+      },
+      call,                       // generic worker op (see worker.js)
+      log: (s) => log(s),
+    };
+    window.egitReady = true;
+    log('egit hooks ready');
   </script>
 </body>

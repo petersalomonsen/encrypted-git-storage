@@ -40,11 +40,29 @@ independently, so incremental pushes only add one new encrypted pack.
 
 ## Push / fetch
 
-- **push:** `git pack-objects --thin --revs` (like near-git-storage) → encrypt →
-  PUT `<repoId>/packs/<next>` → update the manifest (advance refs, append pack,
-  bump `generation`) → CAS-write `<repoId>/refs`.
-- **fetch/clone:** GET+decrypt `refs`, then GET+decrypt the packs the client needs;
-  feed objects to git (`git index-pack` / a temp pack, or fast-import).
+Two transports, one store, shared `src/core`:
+
+- **CLI (`git-remote-egit`)**
+  - *push:* `git pack-objects --thin --revs` → encrypt → PUT `<repoId>/packs/<next>`
+    → update the manifest (advance refs, append pack, bump `generation`) →
+    CAS-write `<repoId>/refs`.
+  - *fetch/clone:* GET+decrypt `refs`, then GET+decrypt every pack **in index
+    order** and replay each through `git index-pack --stdin --fix-thin` (earlier
+    packs provide the thin-delta bases for later ones).
+- **Browser (service worker = a git smart-HTTP server)** — `core/smart-http.js`:
+  - *info/refs:* advertise refs from the decrypted manifest (v0, HEAD symref,
+    no side-band/multi_ack so clients use the plainest framing).
+  - *upload-pack:* decrypt all packs and **merge them into one valid pack**
+    (`core/packcat.js`): strip each 12-byte header + 20-byte SHA-1 trailer,
+    concatenate the object sections in push order, write a summed-count header
+    and a fresh SHA-1. OFS_DELTA offsets survive (relative, section-local) and
+    REF_DELTA thin bases appear earlier in the merged stream, so the result is
+    self-contained — verified against `git index-pack --strict` in a bare repo.
+  - *receive-pack:* store the pushed pack encrypted, check each command's
+    old-sha against the manifest, CAS the refs manifest (retry loop).
+
+`test/gateway` drives the exact same smart-HTTP handlers with the real git CLI
+through a small node adapter — protocol bugs reproduce there without a browser.
 
 ## Refs compare-and-set (concurrent-push safety)
 
@@ -67,9 +85,47 @@ tests). The **gateway proxy** (`src/gateway/proxy.js`) authenticates the caller 
 scopes them to their `<repoId>/*` keys, keeping bucket credentials server-side and
 avoiding browser→S3 CORS. It never decrypts.
 
+## Maintenance (compaction / GC / prune)
+
+The append model grows by one pack per push, and a pusher that stores a pack but
+loses the refs CAS leaves an orphaned `packs/<n>` behind. Three client-side ops
+fix this (`core/maintenance.js`; the backend still only sees ciphertext):
+
+- **compact** — merge every referenced pack into one via `core/packcat.js`.
+  Env-agnostic (no git): the CLI runs `git-remote-egit --compact <url>`, and the
+  browser can compact too. Keeps all objects, so it shrinks pack count/overhead
+  but not unreachable data.
+- **gc** — `git-remote-egit --gc <url>` (CLI only, needs git): replay all packs
+  into a scratch bare repo, `git pack-objects --revs` from the manifest refs →
+  one minimal pack. Drops objects orphaned by force-pushes/deleted branches and
+  re-deltifies.
+- **prune** — `git-remote-egit --prune[=mins] <url>`: delete stored packs the
+  manifest doesn't reference, age-guarded via the store's lastModified (default
+  60 min) so an in-flight push's pack (CAS not yet landed) is never swept.
+
+Both compact and gc go through a CAS-safe swap (`replacePacks`): write the merged
+pack at a fresh index, CAS the manifest to reference only it, THEN delete the
+superseded packs; on CAS conflict (concurrent push) delete the merged pack and
+retry. A reader holding a pre-compaction manifest can hit a deleted pack (404) —
+it should reload the manifest and retry.
+
+**Force-push semantics:** allowed and tested on both transports. The CLI helper
+checks fast-forward locally (skipped with `+`/`--force`); smart-HTTP receive-pack
+requires each command's old-sha to match the manifest exactly (concurrency
+safety — the ff check is the client's job in v0). Rewritten-away objects remain
+in the store until `--gc`. A forced move to an existing commit (or a new branch
+at one) is a ref-only manifest update — no pack is stored.
+
 ## Open items
 
-- Pack compaction / GC (the append model grows; decide when to repack).
-- Force-push / history rewrite semantics.
 - `git-remote-egit` packaging + how the CLI user supplies the exported key.
-- Confirm conditional-write support on the chosen production backend.
+- Confirm conditional-write support on the chosen production backend (MinIO
+  enforces both `If-None-Match: *` and `If-Match` on PUT — verified by tests).
+- Automatic compaction policy (e.g. compact when pack count exceeds N) — the
+  mechanism exists; deciding when to trigger it is a consumer concern.
+- Possible later: a Rust `git-remote-egit` as a single static binary (nicer CLI
+  distribution — no Node needed). The format is now frozen and policed by
+  `test/cli` + `test/gateway` + `test/interop`, so a second implementation can be
+  validated by pointing those suites at the Rust binary on PATH. The gateway
+  stays in Node either way — it holds no logic (auth + streaming proxy, never
+  decrypts) and Ariz swaps in its NEP-413 middleware there.

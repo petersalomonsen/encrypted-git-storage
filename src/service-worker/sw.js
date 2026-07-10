@@ -1,31 +1,67 @@
-// Service worker: the browser's remote-helper equivalent.
+// Service worker: the browser's remote-helper equivalent — a git smart-HTTP
+// "server" for wasm-git, answering from the encrypted object store.
 //
 // wasm-git (running in the app/worker) performs ordinary git smart-HTTP requests
-// to a virtual URL under this SW's scope. The SW intercepts them and implements the
-// transfer itself against the gateway proxy — encrypting packs and the refs
+// to a virtual URL under this SW's scope. The SW intercepts them and implements
+// the transfer itself against the gateway proxy — encrypting packs and the refs
 // manifest with ../core/crypto.js — so no smart git server is involved and the
 // backend only ever sees ciphertext.
 //
-// Model this on near-git-storage's service worker (which does the same, translating
-// to NEAR RPC instead of an encrypted object store).
+//   wasm-git (worker) ──/egit/<repoId>/…──> THIS SW ──/store/<repoId>/…──> gateway ──> S3
 //
-// Requests to intercept (under e.g. /egit/<repoId>/...):
-//   GET  .../info/refs?service=git-upload-pack   -> ref advertisement from manifest
-//   POST .../git-upload-pack                      -> serve requested objects (decrypt packs, build a pack)
-//   GET  .../info/refs?service=git-receive-pack   -> ref advertisement
-//   POST .../git-receive-pack                     -> receive client's pack, encrypt, store, CAS refs
+// All protocol logic lives in ../core/smart-http.js — shared with the node
+// adapter in test/helpers/smart-server.mjs, where the REAL git CLI exercises it
+// (test/gateway). This file is only fetch-event plumbing. Register as a MODULE
+// service worker:
+//   navigator.serviceWorker.register('/src/service-worker/sw.js', { type: 'module', scope: '/' })
 //
-// TODO(next session): implement fetch() handler + the smart-HTTP framing. The AES
-// key is provided by the app via postMessage (Ariz derives it from the wallet).
+// The AES key never leaves the client: the app hands it over per repoId via
+// postMessage ({ type: 'egit-set-key', repoId, keyHex }, ack on ports[0]).
+// Keys are in-memory only — the app must re-send after a SW restart.
 
-const SCOPE_PREFIX = '/egit/';
+import { handleInfoRefs, handleUploadPack, handleReceivePack } from '../core/smart-http.js';
+import { makeStoreClient } from '../core/store-client.js';
+
+const keys = new Map(); // repoId -> Uint8Array(32)
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
+self.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (msg?.type === 'egit-set-key') {
+        keys.set(msg.repoId, Uint8Array.from(msg.keyHex.match(/../g), h => parseInt(h, 16)));
+        event.ports[0]?.postMessage({ type: 'egit-key-set', repoId: msg.repoId });
+    }
+});
+
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
-    if (!url.pathname.startsWith(SCOPE_PREFIX)) return; // pass through everything else
-    // TODO: route info/refs, git-upload-pack, git-receive-pack -> core + gateway proxy.
-    event.respondWith(new Response('git-over-encrypted-store: not implemented yet', { status: 501 }));
+    if (url.origin !== self.location.origin) return;
+    const m = url.pathname.match(/^\/egit\/([^/]+)\/(info\/refs|git-upload-pack|git-receive-pack)$/);
+    if (!m) return; // pass through everything else (incl. this SW's own /store/* fetches)
+    event.respondWith(handle(event.request, m[1], m[2], url));
 });
+
+async function handle(request, repoId, endpoint, url) {
+    try {
+        const key = keys.get(repoId);
+        if (!key) return new Response(`no key registered for repo ${repoId}`, { status: 403 });
+        const store = makeStoreClient(`${self.location.origin}/store/${repoId}`, repoId);
+
+        let out;
+        if (endpoint === 'info/refs') {
+            out = await handleInfoRefs(url.searchParams.get('service'), store, key);
+        } else {
+            const body = new Uint8Array(await request.arrayBuffer());
+            const handler = endpoint === 'git-upload-pack' ? handleUploadPack : handleReceivePack;
+            out = await handler(body, store, key);
+        }
+        return new Response(out.body, {
+            status: 200,
+            headers: { 'content-type': out.contentType, 'cache-control': 'no-cache' },
+        });
+    } catch (e) {
+        return new Response(`egit service worker error: ${e?.stack ?? e}`, { status: 500 });
+    }
+}

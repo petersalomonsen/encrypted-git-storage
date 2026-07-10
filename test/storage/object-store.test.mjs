@@ -3,23 +3,21 @@
 // operations the encrypted-pack store needs (put/get/list/delete of opaque blobs,
 // and a create-if-absent conditional write for refs-CAS), independent of any git
 // or encryption logic. Keep this green; build the rest on top.
-import { test, before, describe } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     makeClient, ensureBucket, storeReachable, put, getBytes, list, del, S3_BUCKET
 } from '../helpers/minio.mjs';
 
+// Resolve reachability at load time: node:test's `skip` option takes a boolean,
+// not a function (a function is always truthy → tests would silently never run).
 const client = makeClient();
-let reachable = false;
-
-before(async () => {
-    reachable = await storeReachable(client);
-    if (reachable) await ensureBucket(client);
-    else console.warn(`\n[skip] object store not reachable — start MinIO or set S3_ENDPOINT. Bucket=${S3_BUCKET}\n`);
-});
+const reachable = await storeReachable(client);
+if (reachable) await ensureBucket(client);
+else console.warn(`\n[skip] object store not reachable — start MinIO or set S3_ENDPOINT. Bucket=${S3_BUCKET}\n`);
 
 describe('object store harness (MinIO / S3)', () => {
-    test('put → get round-trips opaque bytes', { skip: () => !reachable }, async () => {
+    test('put → get round-trips opaque bytes', { skip: !reachable }, async () => {
         const key = `t/${Date.now()}/pack-0`;
         const body = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02]);
         await put(client, key, body);
@@ -28,7 +26,7 @@ describe('object store harness (MinIO / S3)', () => {
         await del(client, key);
     });
 
-    test('list returns keys under a repo prefix', { skip: () => !reachable }, async () => {
+    test('list returns keys under a repo prefix', { skip: !reachable }, async () => {
         const repo = `t/${Date.now()}-list`;
         await put(client, `${repo}/packs/0`, Buffer.from('a'));
         await put(client, `${repo}/packs/1`, Buffer.from('b'));
@@ -43,7 +41,7 @@ describe('object store harness (MinIO / S3)', () => {
     // the building block for "update refs only if unchanged" on push.
     // NOTE: verify the target MinIO version supports conditional PutObject; if not,
     // this test skips and the design falls back to versioned-object CAS (see docs).
-    test('create-if-absent conditional write (refs-CAS primitive)', { skip: () => !reachable }, async () => {
+    test('create-if-absent conditional write (refs-CAS primitive)', { skip: !reachable }, async () => {
         const key = `t/${Date.now()}-cas/refs`;
         const attempt = () => put(client, key, Buffer.from('v1'), { IfNoneMatch: '*' })
             .then(() => 'ok', (e) => e?.$metadata?.httpStatusCode ?? e?.name ?? 'err');

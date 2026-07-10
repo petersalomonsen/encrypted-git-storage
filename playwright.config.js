@@ -12,17 +12,17 @@ export default defineConfig({
     retries: process.env.CI ? 2 : 0,
     reporter: 'line',
     use: {
-        baseURL: 'http://127.0.0.1:8080',
+        baseURL: 'http://127.0.0.1:8787',
         headless: true,
         trace: 'retain-on-failure',
     },
     projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 
-    // TODO(next session): boot the gateway proxy (src/gateway/proxy.js) + a static
-    // server for test/e2e/page so the SW + wasm-git can run against MinIO.
-    // webServer: {
-    //   command: 'node src/gateway/proxy.js',
-    //   port: 8080,
-    //   reuseExistingServer: !process.env.CI,
-    // },
+    // One origin: test page + SW + core modules + wasm-git assets + the gateway
+    // proxy under /store (which fronts MinIO — must be running, as in CI).
+    webServer: {
+        command: 'node test/e2e/server.mjs',
+        port: 8787,
+        reuseExistingServer: !process.env.CI,
+    },
 });
