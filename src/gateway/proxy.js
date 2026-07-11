@@ -41,8 +41,39 @@ const isPreconditionFailure = (e) =>
 const isMissing = (e) =>
     e?.$metadata?.httpStatusCode === 404 || e?.name === 'NoSuchKey' || e?.name === 'NotFound';
 
-export function createProxy({ s3 = s3FromEnv(), bucket = process.env.S3_BUCKET ?? 'egit-test', auth } = {}) {
+export function createProxy({
+    s3 = s3FromEnv(),
+    bucket = process.env.S3_BUCKET ?? 'egit-test',
+    auth,
+    // CORS: opt-in list of page origins allowed to reach the store from another
+    // origin (e.g. the app on near.page, this gateway on fly.dev). Cross-origin
+    // PUTs with an Authorization header always preflight, so OPTIONS is answered
+    // here BEFORE auth. ETag is exposed — the refs CAS client reads it.
+    allowedOrigins,
+} = {}) {
     const app = express();
+
+    if (allowedOrigins?.length) {
+        const allowed = new Set(allowedOrigins);
+        app.use((req, res, next) => {
+            const origin = req.header('origin');
+            if (origin && (allowed.has(origin) || allowed.has('*'))) {
+                res.set('Access-Control-Allow-Origin', allowed.has('*') ? '*' : origin);
+                res.set('Vary', 'Origin');
+                res.set('Access-Control-Expose-Headers', 'ETag');
+                if (req.method === 'OPTIONS') {
+                    res.set('Access-Control-Allow-Methods', 'GET, PUT, DELETE, OPTIONS');
+                    res.set('Access-Control-Allow-Headers',
+                        req.header('access-control-request-headers')
+                        ?? 'authorization, content-type, if-match, if-none-match, x-repo-id');
+                    res.set('Access-Control-Max-Age', '600');
+                    return res.status(204).end();
+                }
+            }
+            next(); // disallowed-origin preflights fall through to auth → 401, no ACAO
+        });
+    }
+
     app.use(express.raw({ type: '*/*', limit: '100mb' }));
 
     // STUB auth: repoId from the `x-repo-id` header. Replace in Ariz with NEP-413.

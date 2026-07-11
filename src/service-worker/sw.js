@@ -15,14 +15,26 @@
 // service worker:
 //   navigator.serviceWorker.register('/src/service-worker/sw.js', { type: 'module', scope: '/' })
 //
-// The AES key never leaves the client: the app hands it over per repoId via
-// postMessage ({ type: 'egit-set-key', repoId, keyHex }, ack on ports[0]).
-// Keys are in-memory only — the app must re-send after a SW restart.
+// The AES key never leaves the client: the app configures each repo via
+// postMessage (ack on ports[0]):
+//
+//   { type: 'egit-set-key', repoId, keyHex,
+//     storeBaseUrl?,   // absolute per-repo store base (may be another origin,
+//                      //   e.g. 'https://gateway.example.com/<repoId>');
+//                      //   defaults to same-origin '/store/<repoId>'
+//     headers? }       // extra headers on every store request — the consumer's
+//                      //   auth scheme (e.g. { Authorization: 'Bearer …' });
+//                      //   the gateway needs CORS (createProxy allowedOrigins)
+//                      //   when storeBaseUrl is cross-origin
+//
+// Re-sending the message replaces the repo's config, so an app can refresh an
+// expiring token without re-registering the SW. Config is in-memory only — the
+// app must re-send after a SW restart.
 
 import { handleInfoRefs, handleUploadPack, handleReceivePack } from '../core/smart-http.js';
 import { makeStoreClient } from '../core/store-client.js';
 
-const keys = new Map(); // repoId -> Uint8Array(32)
+const repos = new Map(); // repoId -> { key: Uint8Array(32), base: string, headers: object }
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -30,7 +42,11 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('message', (event) => {
     const msg = event.data;
     if (msg?.type === 'egit-set-key') {
-        keys.set(msg.repoId, Uint8Array.from(msg.keyHex.match(/../g), h => parseInt(h, 16)));
+        repos.set(msg.repoId, {
+            key: Uint8Array.from(msg.keyHex.match(/../g), h => parseInt(h, 16)),
+            base: msg.storeBaseUrl ?? `${self.location.origin}/store/${msg.repoId}`,
+            headers: msg.headers ?? {},
+        });
         event.ports[0]?.postMessage({ type: 'egit-key-set', repoId: msg.repoId });
     }
 });
@@ -45,9 +61,10 @@ self.addEventListener('fetch', (event) => {
 
 async function handle(request, repoId, endpoint, url) {
     try {
-        const key = keys.get(repoId);
-        if (!key) return new Response(`no key registered for repo ${repoId}`, { status: 403 });
-        const store = makeStoreClient(`${self.location.origin}/store/${repoId}`, repoId);
+        const cfg = repos.get(repoId);
+        if (!cfg) return new Response(`no key registered for repo ${repoId}`, { status: 403 });
+        const { key } = cfg;
+        const store = makeStoreClient(cfg.base, repoId, cfg.headers);
 
         let out;
         if (endpoint === 'info/refs') {

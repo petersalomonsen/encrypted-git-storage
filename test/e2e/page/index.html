@@ -45,14 +45,14 @@
     });
 
     window.egit = {
-      // hand the AES key for a repo to the service worker (MessageChannel ack)
-      async setKey(repoId, keyHex) {
+      // hand the AES key (+ optional storeBaseUrl/headers) for a repo to the SW
+      async setKey(repoId, keyHex, opts = {}) {
         const ch = new MessageChannel();
         const ack = new Promise((res) => { ch.port1.onmessage = res; });
         navigator.serviceWorker.controller.postMessage(
-          { type: 'egit-set-key', repoId, keyHex }, [ch.port2]);
+          { type: 'egit-set-key', repoId, keyHex, ...opts }, [ch.port2]);
         await ack;
-        log(`key set for ${repoId}`);
+        log(`key set for ${repoId}${opts.storeBaseUrl ? ` (store: ${opts.storeBaseUrl})` : ''}`);
       },
       call,                       // generic worker op (see worker.js)
       log: (s) => log(s),

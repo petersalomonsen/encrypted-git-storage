@@ -29,7 +29,7 @@ confidential-transactions consumer).
 Install as a git dependency (no npm registry publish yet):
 
 ```sh
-npm install github:petersalomonsen/encrypted-git-storage#v0.1.0
+npm install github:petersalomonsen/encrypted-git-storage#v0.1.1
 ```
 
 npm runs the package's `prepare` script on git installs, so the bundled service
@@ -70,13 +70,48 @@ await ack;
 //   http://<your-origin>/egit/<repoId>   (SW ⇄ gateway at /store/<repoId>)
 ```
 
-The SW expects the gateway on the same origin under `/store`. See
+By default the SW expects the gateway on the same origin under `/store`. See
 [`test/e2e/page`](test/e2e/page) for a complete working page + worker.
+
+### Cross-origin stores + auth
+
+When the app page and the gateway live on different origins (e.g. the page on
+`arizportfolio.near.page`, the gateway on `arizgateway.fly.dev`), point the SW at
+the foreign store and attach your auth scheme per repo — re-send the same message
+any time to refresh an expiring token, no re-registration needed:
+
+```js
+navigator.serviceWorker.controller.postMessage({
+  type: 'egit-set-key', repoId, keyHex,
+  storeBaseUrl: `https://arizgateway.fly.dev/${repoId}`, // absolute, per-repo
+  headers: { Authorization: `Bearer ${token}` },         // on every store request
+}, [ch.port2]);
+```
+
+The gateway must then allow the page's origin (cross-origin PUTs with an
+`Authorization` header always preflight; `ETag` is exposed for the refs CAS):
+
+```js
+createProxy({
+  allowedOrigins: ['https://arizportfolio.near.page'],
+  auth: (req) => verifyYourToken(req.header('authorization')), // → repoId | null
+}).listen(8080);
+```
+
+The CLI helper sends the same header via env:
+
+```sh
+export EGIT_AUTH="Bearer <token>"   # Authorization on every store request
+git clone egit::https://arizgateway.fly.dev/<repoId>
+```
+
+The library stays auth-agnostic — it only carries the headers. Token issuance
+and verification (NEP-413 in Ariz) are the consumer's, on both ends.
 
 ### CLI
 
 ```sh
-npm install -g github:petersalomonsen/encrypted-git-storage#v0.1.0  # puts git-remote-egit on PATH
+npm install -g github:petersalomonsen/encrypted-git-storage#v0.1.1  # puts git-remote-egit on PATH
 export EGIT_KEY=<64 hex chars>   # the 32-byte repo key
 
 git clone egit::https://gateway.example.com/store/<repoId>

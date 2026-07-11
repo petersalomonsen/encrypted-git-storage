@@ -17,8 +17,10 @@
 //   git-remote-egit --prune[=mins] <url>  delete unreferenced packs older than mins (60)
 //
 // The AES key comes from EGIT_KEY (64 hex chars or base64 for 32 bytes) in the
-// environment (Ariz exports the wallet-derived key). ../core is shared verbatim
-// with the service worker so both sides interoperate on the same store.
+// environment (Ariz exports the wallet-derived key). EGIT_AUTH, when set (e.g.
+// "Bearer <token>"), is sent as the Authorization header on every store request
+// — the consumer's own gateway auth scheme. ../core is shared verbatim with the
+// service worker so both sides interoperate on the same store.
 
 import process from 'node:process';
 import { createInterface } from 'node:readline';
@@ -50,6 +52,14 @@ function parseRemoteUrl(url) {
     const repoId = stripped.slice(stripped.lastIndexOf('/') + 1);
     if (!repoId) throw new Error(`cannot extract repoId from remote url: ${url}`);
     return { base: stripped, repoId };
+}
+
+/** Store client from argv url + env: EGIT_AUTH (if set) rides on every request. */
+function storeFromEnv(url) {
+    const { base, repoId } = parseRemoteUrl(url ?? '');
+    const key = parseKey(process.env.EGIT_KEY);
+    const authHeaders = process.env.EGIT_AUTH ? { authorization: process.env.EGIT_AUTH } : {};
+    return { store: makeStoreClient(base, repoId, authHeaders), key, repoId };
 }
 
 // ---------------------------------------------------------------------------
@@ -200,9 +210,7 @@ async function gcBuild(manifest, plaintextPacks) {
 }
 
 async function runMaintenance(mode, url) {
-    const { base, repoId } = parseRemoteUrl(url ?? '');
-    const key = parseKey(process.env.EGIT_KEY);
-    const store = makeStoreClient(base, repoId);
+    const { store, key, repoId } = storeFromEnv(url);
     const log = (s) => process.stderr.write(`${s}\n`);
 
     if (mode === '--compact') {
@@ -228,9 +236,7 @@ async function main() {
     const [, , arg2, url] = process.argv;
     if (arg2?.startsWith('--')) return runMaintenance(arg2, url);
 
-    const { base, repoId } = parseRemoteUrl(url ?? '');
-    const key = parseKey(process.env.EGIT_KEY);
-    const store = makeStoreClient(base, repoId);
+    const { store, key } = storeFromEnv(url);
     const out = (s) => process.stdout.write(s);
 
     const lines = createInterface({ input: process.stdin, terminal: false })[Symbol.asyncIterator]();
