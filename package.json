@@ -14,7 +14,7 @@
   "files": [
     "src",
     "dist",
-    "docs/design.md"
+    "docs"
   ],
   "exports": {
     ".": "./src/core/index.js",
