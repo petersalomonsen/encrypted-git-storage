@@ -1,6 +1,6 @@
 {
   "name": "encrypted-git-storage",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Sync a git repository to a dumb object store with the whole repo encrypted client-side — a service worker (browser) + git remote helper (CLI), like near-git-storage but S3-backed and encrypted.",
   "type": "module",
   "license": "MIT",
