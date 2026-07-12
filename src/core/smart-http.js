@@ -141,13 +141,16 @@ export async function handleReceivePack(reqBody, store, key) {
                 stale.includes(c) ? `ng ${c.ref} fetch first\n` : `ng ${c.ref} not attempted\n`));
         }
 
-        // A push WITHOUT a packfile must not move a ref to an OID the store has
-        // never seen: accepting it would advance the ref while its objects are
-        // lost — every later fetch then dies with "target OID for the reference
-        // doesn't exist" and the pusher never knew. Deletes and updates to an
-        // OID some existing ref already carries are the only legitimate
-        // pack-less commands.
-        if (!packMeta) {
+        // A push whose body carries NO pack section at all must not move a ref
+        // to an OID the store has never seen: accepting it would advance the
+        // ref while its objects are lost — every later fetch then dies with
+        // "target OID for the reference doesn't exist" and the pusher never
+        // knew. Zero-OBJECT packs are different and legitimate: git sends one
+        // for ref-only updates whose objects the server already has (e.g. a
+        // force-back to an earlier commit) — without connectivity checks a
+        // dumb encrypted store cannot validate those, and rejecting them
+        // breaks real git, so only the missing-pack-section case is guarded.
+        if (packBytes.length === 0) {
             const known = new Set(Object.values(manifest.refs));
             const missing = commands.filter(c => c.newSha !== ZERO_SHA && !known.has(c.newSha));
             if (missing.length > 0) {

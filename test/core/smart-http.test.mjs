@@ -85,12 +85,18 @@ describe('receive-pack: pack-less pushes must not lose objects', () => {
         assert.doesNotMatch(refs, new RegExp(SHA_B));
     });
 
-    test('a zero-object pack is treated as pack-less and rejected the same way', async () => {
+    test('a zero-OBJECT pack is a legitimate ref-only push (git force-back) and is accepted', async () => {
         const store = memStore();
         await handleReceivePack(pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(3)), store, KEY);
+        // git sends an empty pack when moving a ref to an OID whose objects the
+        // server already has (e.g. force-back to an ancestor) — a dumb store
+        // cannot connectivity-check that, so it must be allowed through.
         const res = await handleReceivePack(
             pushBody([`${SHA_A} ${SHA_B} refs/heads/master`], fakePack(0, new Uint8Array(0))), store, KEY);
-        assert.match(text(res), /ng refs\/heads\/master push carried no packfile/);
+        assert.match(text(res), /ok refs\/heads\/master/);
+        assert.equal(store.state.packs.size, 1); // no empty pack stored
+        const refs = new TextDecoder().decode((await handleInfoRefs('git-upload-pack', store, KEY)).body);
+        assert.match(refs, new RegExp(`${SHA_B} refs/heads/master`));
     });
 
     test('pack-less ref DELETE is allowed', async () => {
