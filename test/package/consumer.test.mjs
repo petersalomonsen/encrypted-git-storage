@@ -1,6 +1,6 @@
 // Proves the repo is consumable as a package:
-//  - `npm pack` (runs `prepare` → esbuild) produces a tarball whose `files`
-//    include src/, the bin, and the bundled dist/sw.js
+//  - `npm pack` produces a tarball whose `files` include src/, the bin, and
+//    the COMMITTED dist/sw.js (no `prepare`: git-dep installs must not build)
 //  - a consumer project can `import { createProxy } from 'encrypted-git-storage/gateway'`
 //    and `import { encrypt, … } from 'encrypted-git-storage/core'` through the
 //    exports map, and actually run the gateway
@@ -41,7 +41,7 @@ before(async () => {
 after(() => rm(work, { recursive: true, force: true }));
 
 describe('consumable as a package', () => {
-    test('tarball ships src, the bin, and the bundled dist/sw.js (via prepare)', async () => {
+    test('tarball ships src, the bin, and the committed dist/sw.js', async () => {
         for (const f of [
             'package.json',
             'src/core/index.js',

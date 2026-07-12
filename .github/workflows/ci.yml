@@ -35,9 +35,16 @@ jobs:
             echo "waiting for MinIO ($i)"; sleep 2
           done
 
-      # npm ci runs `prepare` → esbuild bundles dist/sw.js (also exercised by the
-      # packaging test and the dist-sw e2e spec).
       - run: npm ci
+
+      # dist/sw.js is COMMITTED (no `prepare`: git-dep installs run it in an
+      # isolated clone where devDependencies' binaries are unreliable — a global
+      # `npm i -g github:…` died on `esbuild: command not found`). Guard that
+      # the committed bundle never drifts from the source.
+      - name: dist/sw.js is up to date
+        run: |
+          npm run build
+          git diff --exit-code dist/sw.js
 
       # Node test suites: object-store harness, core, cli remote helper,
       # smart-HTTP vs real git, package consumability.
