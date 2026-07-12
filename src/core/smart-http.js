@@ -108,7 +108,15 @@ export async function handleReceivePack(reqBody, store, key) {
         const [oldSha, newSha, ref] = l.split('\0')[0].split(' ');
         return { oldSha, newSha, ref };
     }).filter(c => c.ref);
-    if (commands.length === 0) throw new Error('receive-pack: no commands');
+    if (commands.length === 0) {
+        // git's remote-curl PROBES with a flush-only request before streaming a
+        // push body larger than http.postBuffer (1 MiB default) — answer it
+        // with an empty 200 like git-http-backend, or every big CLI push dies.
+        if (packBytes.length === 0) {
+            return { body: new Uint8Array(0), contentType: 'application/x-git-receive-pack-result' };
+        }
+        throw new Error('receive-pack: no commands');
+    }
 
     const report = (refLines) => ({
         body: pktLines(['unpack ok\n', ...refLines]),
@@ -131,6 +139,25 @@ export async function handleReceivePack(reqBody, store, key) {
         if (stale.length > 0) {
             return report(commands.map(c =>
                 stale.includes(c) ? `ng ${c.ref} fetch first\n` : `ng ${c.ref} not attempted\n`));
+        }
+
+        // A push whose body carries NO pack section at all must not move a ref
+        // to an OID the store has never seen: accepting it would advance the
+        // ref while its objects are lost — every later fetch then dies with
+        // "target OID for the reference doesn't exist" and the pusher never
+        // knew. Zero-OBJECT packs are different and legitimate: git sends one
+        // for ref-only updates whose objects the server already has (e.g. a
+        // force-back to an earlier commit) — without connectivity checks a
+        // dumb encrypted store cannot validate those, and rejecting them
+        // breaks real git, so only the missing-pack-section case is guarded.
+        if (packBytes.length === 0) {
+            const known = new Set(Object.values(manifest.refs));
+            const missing = commands.filter(c => c.newSha !== ZERO_SHA && !known.has(c.newSha));
+            if (missing.length > 0) {
+                return report(commands.map(c => missing.includes(c)
+                    ? `ng ${c.ref} push carried no packfile for new objects\n`
+                    : `ng ${c.ref} not attempted\n`));
+            }
         }
 
         let pack = null;
