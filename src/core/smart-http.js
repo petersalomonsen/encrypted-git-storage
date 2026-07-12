@@ -133,6 +133,22 @@ export async function handleReceivePack(reqBody, store, key) {
                 stale.includes(c) ? `ng ${c.ref} fetch first\n` : `ng ${c.ref} not attempted\n`));
         }
 
+        // A push WITHOUT a packfile must not move a ref to an OID the store has
+        // never seen: accepting it would advance the ref while its objects are
+        // lost — every later fetch then dies with "target OID for the reference
+        // doesn't exist" and the pusher never knew. Deletes and updates to an
+        // OID some existing ref already carries are the only legitimate
+        // pack-less commands.
+        if (!packMeta) {
+            const known = new Set(Object.values(manifest.refs));
+            const missing = commands.filter(c => c.newSha !== ZERO_SHA && !known.has(c.newSha));
+            if (missing.length > 0) {
+                return report(commands.map(c => missing.includes(c)
+                    ? `ng ${c.ref} push carried no packfile for new objects\n`
+                    : `ng ${c.ref} not attempted\n`));
+            }
+        }
+
         let pack = null;
         if (packMeta) {
             if (storedAt === null) {
