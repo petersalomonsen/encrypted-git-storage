@@ -26,7 +26,6 @@
   },
   "scripts": {
     "build": "esbuild src/service-worker/sw.js --bundle --format=esm --outfile=dist/sw.js --log-level=warning",
-    "prepare": "npm run build",
     "test": "node --test 'test/**/*.test.mjs'",
     "test:e2e": "playwright test",
     "dev": "node src/gateway/proxy.js"
