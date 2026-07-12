@@ -109,6 +109,20 @@ describe('receive-pack: pack-less pushes must not lose objects', () => {
         assert.match(text(res), /ok refs\/heads\/backup/);
     });
 
+    test('a flush-only PROBE request (remote-curl, >1MiB pushes) gets an empty 200, not an error', async () => {
+        const store = memStore();
+        await handleReceivePack(pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(3)), store, KEY);
+        // git's remote-curl sends exactly one flush pkt to probe before
+        // streaming a large push body; the real push follows separately.
+        const res = await handleReceivePack(new TextEncoder().encode('0000'), store, KEY);
+        assert.equal(res.body.length, 0);
+        assert.equal(res.contentType, 'application/x-git-receive-pack-result');
+        // Nothing changed: no pack stored, ref untouched.
+        assert.equal(store.state.packs.size, 1);
+        const refs = new TextDecoder().decode((await handleInfoRefs('git-upload-pack', store, KEY)).body);
+        assert.match(refs, new RegExp(`${SHA_A} refs/heads/master`));
+    });
+
     test('upload-pack serves the stored packs merged after a push', async () => {
         const store = memStore();
         await handleReceivePack(pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(2)), store, KEY);

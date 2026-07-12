@@ -108,7 +108,15 @@ export async function handleReceivePack(reqBody, store, key) {
         const [oldSha, newSha, ref] = l.split('\0')[0].split(' ');
         return { oldSha, newSha, ref };
     }).filter(c => c.ref);
-    if (commands.length === 0) throw new Error('receive-pack: no commands');
+    if (commands.length === 0) {
+        // git's remote-curl PROBES with a flush-only request before streaming a
+        // push body larger than http.postBuffer (1 MiB default) — answer it
+        // with an empty 200 like git-http-backend, or every big CLI push dies.
+        if (packBytes.length === 0) {
+            return { body: new Uint8Array(0), contentType: 'application/x-git-receive-pack-result' };
+        }
+        throw new Error('receive-pack: no commands');
+    }
 
     const report = (refLines) => ({
         body: pktLines(['unpack ok\n', ...refLines]),
