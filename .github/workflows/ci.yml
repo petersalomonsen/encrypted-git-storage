@@ -61,3 +61,37 @@ jobs:
       - name: MinIO logs (on failure)
         if: failure()
         run: docker logs minio || true
+
+  # Auto-publish to npm when a version bump lands on main: merging a release PR
+  # IS the release. Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret;
+  # npmjs.com package settings must list this repo + workflow (ci.yml) as a
+  # trusted publisher. Provenance attestation comes automatically with OIDC.
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC exchange with npm
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1.
+      - run: npm install -g npm@latest
+
+      - name: Publish when package.json is ahead of the registry
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view "$NAME" version 2>/dev/null || echo none)
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "$NAME@$LOCAL already published — nothing to do"
+            exit 0
+          fi
+          echo "publishing $NAME@$LOCAL (registry has $PUBLISHED)"
+          npm publish
