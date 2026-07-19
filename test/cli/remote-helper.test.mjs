@@ -144,6 +144,51 @@ describe('remote-helper (git-remote-egit) over encrypted object store', () => {
             'clone with a wrong key must fail'
         );
     });
+
+    test('credentials from git config (egit.key/egit.auth) when the env is unset', { skip: !reachable }, async () => {
+        // No EGIT_KEY/EGIT_AUTH in the environment at all.
+        const { EGIT_KEY, EGIT_AUTH, ...envNoCreds } = env;
+
+        // Without a key anywhere the helper must refuse with a hint at both sources.
+        const f0 = join(work, 'repo-f0');
+        await assert.rejects(
+            () => execFileP('git', ['clone', remoteUrl(), f0], { cwd: work, env: envNoCreds }),
+            /EGIT_KEY|egit\.key/,
+            'missing key must name both credential sources'
+        );
+
+        // Clone bootstraps via inline config: `git -c egit.key=…` reaches the
+        // helper through GIT_CONFIG_PARAMETERS.
+        const f = join(work, 'repo-f');
+        await execFileP('git', ['-c', `egit.key=${KEY_HEX}`, 'clone', remoteUrl(), f], {
+            cwd: work, env: envNoCreds,
+        });
+        assert.equal(await readFile(join(f, 'hello.txt'), 'utf8'), 'hello encrypted world\n');
+
+        // Persist the credentials in the repo config — plain git pull/push work
+        // from here on, no env exports.
+        await execFileP('git', ['config', 'egit.key', KEY_HEX], { cwd: f, env: envNoCreds });
+        await execFileP('git', ['config', 'egit.auth', 'Bearer test-config-token'], { cwd: f, env: envNoCreds });
+        await execFileP('git', ['pull', remoteUrl(), 'main'], { cwd: f, env: envNoCreds });
+        await writeFile(join(f, 'from-config.txt'), 'pushed with git-config credentials\n');
+        await execFileP('git', ['add', '.'], { cwd: f, env: envNoCreds });
+        await execFileP('git', ['commit', '-m', 'config-credential push'], { cwd: f, env: envNoCreds });
+        await execFileP('git', ['push', remoteUrl(), 'main'], { cwd: f, env: envNoCreds });
+
+        // The environment still wins over config: a wrong env key must fail even
+        // though the repo config holds the right one.
+        await assert.rejects(
+            () => execFileP('git', ['pull', remoteUrl(), 'main'], {
+                cwd: f, env: { ...envNoCreds, EGIT_KEY: 'b'.repeat(64) },
+            }),
+            'env EGIT_KEY must take precedence over git config'
+        );
+
+        // And the config-credential push is really in the store.
+        const g = join(work, 'repo-g');
+        await git(work, 'clone', remoteUrl(), g);
+        assert.equal(await readFile(join(g, 'from-config.txt'), 'utf8'), 'pushed with git-config credentials\n');
+    });
 });
 
 describe('remote-helper content variety and multi-ref sync', () => {
