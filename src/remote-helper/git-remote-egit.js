@@ -17,10 +17,14 @@
 //   git-remote-egit --prune[=mins] <url>  delete unreferenced packs older than mins (60)
 //
 // The AES key comes from EGIT_KEY (64 hex chars or base64 for 32 bytes) in the
-// environment (Ariz exports the wallet-derived key). EGIT_AUTH, when set (e.g.
-// "Bearer <token>"), is sent as the Authorization header on every store request
-// — the consumer's own gateway auth scheme. ../core is shared verbatim with the
-// service worker so both sides interoperate on the same store.
+// environment, or from `git config egit.key` when the env is unset — so a
+// configured remote works with plain `git pull`/`git push` (and a first clone
+// can bootstrap via `git -c egit.key=…  clone egit::…`). EGIT_AUTH / `git
+// config egit.auth` (e.g. "Bearer <token>") likewise: sent as the
+// Authorization header on every store request — the consumer's own gateway
+// auth scheme. The environment always wins over config. ../core is shared
+// verbatim with the service worker so both sides interoperate on the same
+// store.
 
 import process from 'node:process';
 import { createInterface } from 'node:readline';
@@ -39,11 +43,11 @@ import { compact, replacePacks, pruneOrphans } from '../core/maintenance.js';
 // config from argv/env
 
 function parseKey(raw) {
-    if (!raw) throw new Error('EGIT_KEY not set — export the 32-byte repo key (hex or base64)');
+    if (!raw) throw new Error('no repo key — set EGIT_KEY in the environment or `git config egit.key` (32 bytes, hex or base64)');
     const bytes = /^[0-9a-fA-F]{64}$/.test(raw)
         ? Uint8Array.from(raw.match(/../g), h => parseInt(h, 16))
         : Uint8Array.from(Buffer.from(raw, 'base64'));
-    if (bytes.length !== 32) throw new Error(`EGIT_KEY must decode to 32 bytes, got ${bytes.length}`);
+    if (bytes.length !== 32) throw new Error(`the repo key must decode to 32 bytes, got ${bytes.length}`);
     return bytes;
 }
 
@@ -54,11 +58,23 @@ function parseRemoteUrl(url) {
     return { base: stripped, repoId };
 }
 
-/** Store client from argv url + env: EGIT_AUTH (if set) rides on every request. */
-function storeFromEnv(url) {
+/** `git config --get <name>` in the repo git invoked us from (git sets cwd /
+ *  GIT_DIR, and `git -c egit.key=…` reaches us via GIT_CONFIG_PARAMETERS).
+ *  Returns null when unset or outside a repo. */
+async function gitConfigGet(name) {
+    const { code, stdout } = await runGit(['config', '--get', name]);
+    const value = code === 0 ? stdout.toString().trim() : '';
+    return value || null;
+}
+
+/** Store client from argv url + credentials. Environment (EGIT_KEY/EGIT_AUTH)
+ *  wins; otherwise git config `egit.key` / `egit.auth` — so a configured
+ *  remote works with plain `git pull`/`git push`, no env exports needed. */
+async function storeFromConfig(url) {
     const { base, repoId } = parseRemoteUrl(url ?? '');
-    const key = parseKey(process.env.EGIT_KEY);
-    const authHeaders = process.env.EGIT_AUTH ? { authorization: process.env.EGIT_AUTH } : {};
+    const key = parseKey(process.env.EGIT_KEY ?? await gitConfigGet('egit.key'));
+    const auth = process.env.EGIT_AUTH ?? await gitConfigGet('egit.auth');
+    const authHeaders = auth ? { authorization: auth } : {};
     return { store: makeStoreClient(base, repoId, authHeaders), key, repoId };
 }
 
@@ -210,7 +226,7 @@ async function gcBuild(manifest, plaintextPacks) {
 }
 
 async function runMaintenance(mode, url) {
-    const { store, key, repoId } = storeFromEnv(url);
+    const { store, key, repoId } = await storeFromConfig(url);
     const log = (s) => process.stderr.write(`${s}\n`);
 
     if (mode === '--compact') {
@@ -236,7 +252,7 @@ async function main() {
     const [, , arg2, url] = process.argv;
     if (arg2?.startsWith('--')) return runMaintenance(arg2, url);
 
-    const { store, key } = storeFromEnv(url);
+    const { store, key } = await storeFromConfig(url);
     const out = (s) => process.stdout.write(s);
 
     const lines = createInterface({ input: process.stdin, terminal: false })[Symbol.asyncIterator]();
