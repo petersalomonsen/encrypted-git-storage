@@ -16,6 +16,8 @@ import { makeClient, ensureBucket, storeReachable, getBytes, list, del } from '.
 import { createProxy } from '../../src/gateway/proxy.js';
 import { createSmartServer } from '../helpers/smart-server.mjs';
 import { isEncrypted } from '../../src/core/crypto.js';
+import { makeStoreClient } from '../../src/core/store-client.js';
+import { loadManifest } from '../../src/core/manifest-io.js';
 
 const execFileP = promisify(execFile);
 const HELPER = resolve(fileURLToPath(import.meta.url), '../../../src/remote-helper/git-remote-egit.js');
@@ -29,13 +31,13 @@ const KEY_HEX = 'c'.repeat(64);
 const KEY = Uint8Array.from(KEY_HEX.match(/../g), h => parseInt(h, 16));
 const repoId = `smart-http-${Date.now()}`;
 
-let proxy, smart, smartUrl, work, env;
+let proxy, proxyUrl, smart, smartUrl, work, env;
 
 before(async () => {
     if (!reachable) return;
     const app = createProxy();
     proxy = await new Promise(res => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
-    const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+    proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
     smart = createSmartServer({ proxyUrl, key: KEY });
     await new Promise(res => smart.listen(0, '127.0.0.1', res));
     smartUrl = `http://127.0.0.1:${smart.address().port}/git/${repoId}`;
@@ -181,6 +183,62 @@ describe('smart HTTP (the service-worker protocol) driven by the real git CLI', 
         await git(a, 'reset', '--hard', 'HEAD~1');
         await git(a, 'push', '--force', 'origin', 'main');
         assert.equal((await list(client, `${repoId}/packs/`)).length, packsBefore, 'ref-only force adds no pack');
+    });
+
+    // A repack rewrites the store's packs without moving a ref — the answer to
+    // packs that overlap (core/smart-http.js, "Overlapping packs"). Driven here
+    // the way a client drives it: point a remote at the /repack URL, push the
+    // tip the store already has.
+    test('repack: many packs collapse into one, refs untouched, history intact', { skip: !reachable }, async () => {
+        const id = `${repoId}-repack`;
+        const url = `${smartUrl.slice(0, smartUrl.lastIndexOf('/'))}/${id}`;
+        const manifestOf = () => loadManifest(makeStoreClient(`${proxyUrl}/${id}`, id), KEY).then(r => r.manifest);
+
+        const r = join(work, 'repack-src');
+        await mkdir(r);
+        await git(r, 'init', '-b', 'main');
+        for (let i = 0; i < 4; i++) {
+            await writeFile(join(r, `f-${i}.txt`), `line ${i}\n`.repeat(500));
+            await git(r, 'add', '.');
+            await git(r, 'commit', '-m', `c${i}`);
+            await git(r, 'push', url, 'main');
+        }
+        const before = await manifestOf();
+        assert.equal(before.packs.length, 4, 'one pack per push');
+
+        await git(r, 'push', `${url}/repack`, 'main');
+
+        const after = await manifestOf();
+        assert.equal(after.packs.length, 1, 'the store now references one pack');
+        assert.deepEqual(after.refs, before.refs, 'a repack moves no ref');
+        assert.equal((await list(client, `${id}/packs/`)).length, 5,
+            'superseded packs are left for pruneOrphans, not deleted');
+
+        // What every client cares about: the store still reads back whole.
+        const fresh = join(work, 'repack-clone');
+        await git(work, 'clone', url, fresh);
+        await git(fresh, 'fsck', '--strict');
+        const { stdout: log } = await git(fresh, 'log', '--format=%s');
+        assert.deepEqual(log.trim().split('\n'), ['c3', 'c2', 'c1', 'c0']);
+        assert.equal(await readFile(join(fresh, 'f-3.txt'), 'utf8'), 'line 3\n'.repeat(500));
+    });
+
+    test('repack: a tip the store does not hold is refused, and changes nothing', { skip: !reachable }, async () => {
+        const id = `${repoId}-repack`;
+        const url = `${smartUrl.slice(0, smartUrl.lastIndexOf('/'))}/${id}`;
+        const manifestOf = () => loadManifest(makeStoreClient(`${proxyUrl}/${id}`, id), KEY).then(r => r.manifest);
+        const before = await manifestOf();
+
+        // A commit the store has never seen: repacking to it would move the ref
+        // on the strength of an advertisement that deliberately said nothing.
+        const r = join(work, 'repack-src');
+        await writeFile(join(r, 'unpushed.txt'), 'only here\n');
+        await git(r, 'add', '.');
+        await git(r, 'commit', '-m', 'unpushed');
+        await assert.rejects(() => git(r, 'push', `${url}/repack`, 'main'),
+            /repack must offer the store's current tip|rejected|failed to push/i);
+
+        assert.deepEqual((await manifestOf()).refs, before.refs, 'ref untouched');
     });
 
     test('branch deletion over smart HTTP', { skip: !reachable }, async () => {

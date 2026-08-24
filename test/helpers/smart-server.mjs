@@ -4,7 +4,7 @@
 //
 //   git CLI ──smart HTTP──> this server ──store-client──> gateway proxy ──> MinIO
 //
-// URL shape: /git/<repoId>/(info/refs | git-upload-pack | git-receive-pack)
+// URL shape: /git/<repoId>[/repack]/(info/refs | git-upload-pack | git-receive-pack)
 import { createServer } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import { handleInfoRefs, handleUploadPack, handleReceivePack } from '../../src/core/smart-http.js';
@@ -14,21 +14,22 @@ export function createSmartServer({ proxyUrl, key }) {
     return createServer(async (req, res) => {
         try {
             const url = new URL(req.url, 'http://localhost');
-            const m = url.pathname.match(/^\/git\/([^/]+)\/(info\/refs|git-upload-pack|git-receive-pack)$/);
+            const m = url.pathname.match(/^\/git\/([^/]+)\/(repack\/)?(info\/refs|git-upload-pack|git-receive-pack)$/);
             if (!m) { res.writeHead(404); return res.end('not found'); }
-            const [, repoId, endpoint] = m;
+            const [, repoId, repackPrefix, endpoint] = m;
+            const options = { repack: !!repackPrefix };
             const store = makeStoreClient(`${proxyUrl}/${repoId}`, repoId);
 
             let out;
             if (endpoint === 'info/refs') {
-                out = await handleInfoRefs(url.searchParams.get('service'), store, key);
+                out = await handleInfoRefs(url.searchParams.get('service'), store, key, options);
             } else {
                 const chunks = [];
                 for await (const c of req) chunks.push(c);
                 let body = Buffer.concat(chunks);
                 if (req.headers['content-encoding'] === 'gzip') body = gunzipSync(body); // git gzips big bodies
                 const handle = endpoint === 'git-upload-pack' ? handleUploadPack : handleReceivePack;
-                out = await handle(new Uint8Array(body), store, key);
+                out = await handle(new Uint8Array(body), store, key, options);
             }
             res.writeHead(200, { 'content-type': out.contentType, 'cache-control': 'no-cache' });
             res.end(Buffer.from(out.body));

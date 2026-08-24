@@ -54,12 +54,16 @@ self.addEventListener('message', (event) => {
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
     if (url.origin !== self.location.origin) return;
-    const m = url.pathname.match(/^\/egit\/([^/]+)\/(info\/refs|git-upload-pack|git-receive-pack)$/);
+    // /egit/<repoId>/<endpoint>, plus /egit/<repoId>/repack/<endpoint>: a push
+    // that rewrites the store's packs without moving any ref (see
+    // core/smart-http.js, "Overlapping packs"). To run one, point a remote at
+    // the /repack URL and push the tip the store already has.
+    const m = url.pathname.match(/^\/egit\/([^/]+)\/(repack\/)?(info\/refs|git-upload-pack|git-receive-pack)$/);
     if (!m) return; // pass through everything else (incl. this SW's own /store/* fetches)
-    event.respondWith(handle(event.request, m[1], m[2], url));
+    event.respondWith(handle(event.request, m[1], m[3], url, { repack: !!m[2] }));
 });
 
-async function handle(request, repoId, endpoint, url) {
+async function handle(request, repoId, endpoint, url, options = {}) {
     try {
         const cfg = repos.get(repoId);
         if (!cfg) return new Response(`no key registered for repo ${repoId}`, { status: 403 });
@@ -68,11 +72,11 @@ async function handle(request, repoId, endpoint, url) {
 
         let out;
         if (endpoint === 'info/refs') {
-            out = await handleInfoRefs(url.searchParams.get('service'), store, key);
+            out = await handleInfoRefs(url.searchParams.get('service'), store, key, options);
         } else {
             const body = new Uint8Array(await request.arrayBuffer());
             const handler = endpoint === 'git-upload-pack' ? handleUploadPack : handleReceivePack;
-            out = await handler(body, store, key);
+            out = await handler(body, store, key, options);
         }
         return new Response(out.body, {
             status: 200,

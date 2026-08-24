@@ -52,14 +52,52 @@ Two transports, one store, shared `src/core`:
 - **Browser (service worker = a git smart-HTTP server)** — `core/smart-http.js`:
   - *info/refs:* advertise refs from the decrypted manifest (v0, HEAD symref,
     no side-band/multi_ack so clients use the plainest framing).
-  - *upload-pack:* decrypt all packs and **merge them into one valid pack**
+  - *upload-pack:* decrypt all packs and **merge them into one pack**
     (`core/packcat.js`): strip each 12-byte header + 20-byte SHA-1 trailer,
     concatenate the object sections in push order, write a summed-count header
     and a fresh SHA-1. OFS_DELTA offsets survive (relative, section-local) and
     REF_DELTA thin bases appear earlier in the merged stream, so the result is
     self-contained — verified against `git index-pack --strict` in a bare repo.
+    It is only a *valid* pack while no object is in two packs, which a merge push
+    breaks; see **Overlapping packs** below.
   - *receive-pack:* store the pushed pack encrypted, check each command's
     old-sha against the manifest, CAS the refs manifest (retry loop).
+  - *repack* (`{ repack: true }`, served at `…/<repoId>/repack/…`): the same two
+    push endpoints, but info/refs advertises **no refs** so the client packs its
+    whole history, and receive-pack swaps the manifest's pack list for that one
+    pack **without moving any ref**. See **Overlapping packs**.
+
+### Overlapping packs
+
+Merging every pack into one is valid only while the packs are disjoint, and
+nothing guarantees that. A client pushing a **merge commit** re-sends the
+subtrees and blobs its merged tree shares with the side the store already holds
+(libgit2 hides the advertised refs' commits, not every object reachable from
+them). From then on the merged pack carries the same object twice.
+
+The git CLI indexes such a pack without complaining. **libgit2 — i.e. wasm-git,
+this library's primary client — refuses it:**
+
+```
+duplicate object <oid> found in pack
+```
+
+and because a failed fetch never creates the remote-tracking ref, the client
+reports the confusing pair `revspec 'origin/master' not found` and then a
+rejected push. One merge push and no browser can read the store again. (Seen on
+a real store: 89 objects in two packs, all from a single merge push. The CLI
+tests never caught it because the CLI does not care.)
+
+The service worker cannot drop the duplicate: telling two copies apart needs
+each object's id, which needs the deltas resolved — that is `index-pack`, not
+something a SW carries. So the store must not accumulate overlapping packs, and
+the only participant that can build a clean pack is the client, which has a real
+git. That is what a **repack** is: tell the client the store has no refs so it
+builds a complete pack, then swap the pack list for it. Refs never move, so a
+repack cannot lose history; superseded packs are left for **prune** rather than
+deleted, so a bad one is recoverable. A client should run one after any push
+that recorded a merge commit — it is then certainly at the store's tip, which
+the endpoint requires.
 
 `test/gateway` drives the exact same smart-HTTP handlers with the real git CLI
 through a small node adapter — protocol bugs reproduce there without a browser.
@@ -101,7 +139,13 @@ fix this (`core/maintenance.js`; the backend still only sees ciphertext):
   re-deltifies.
 - **prune** — `git-remote-egit --prune[=mins] <url>`: delete stored packs the
   manifest doesn't reference, age-guarded via the store's lastModified (default
-  60 min) so an in-flight push's pack (CAS not yet landed) is never swept.
+  60 min) so an in-flight push's pack (CAS not yet landed) is never swept. This
+  is also what eventually sweeps the packs a **repack** supersedes.
+- **repack** — not a maintenance op but a push, because the work (building one
+  clean pack) needs a real git: the client pushes its tip to `…/<repoId>/repack`
+  and the store swaps its pack list for that pack, refs untouched. Unlike
+  compact, it removes duplicate objects — the one thing that makes upload-pack's
+  merged pack unreadable to libgit2 (see **Overlapping packs**).
 
 Both compact and gc go through a CAS-safe swap (`replacePacks`): write the merged
 pack at a fresh index, CAS the manifest to reference only it, THEN delete the
