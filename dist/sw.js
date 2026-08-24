@@ -181,14 +181,18 @@ function advertisement(manifest, service) {
   }
   return lines;
 }
-async function handleInfoRefs(service, store, key) {
+async function handleInfoRefs(service, store, key, { repack = false } = {}) {
   if (!CAPS[service]) throw new Error(`unsupported service: ${service}`);
+  if (repack && service !== "git-receive-pack") {
+    throw new Error(`repack is a push: ${service} is not available on it`);
+  }
   const { manifest } = await loadManifest(store, key);
+  const advertised = repack ? { ...manifest, refs: {} } : manifest;
   const body = concatBytes(
     pktLine(`# service=${service}
 `),
     FLUSH,
-    pktLines(advertisement(manifest, service))
+    pktLines(advertisement(advertised, service))
   );
   return { body, contentType: `application/x-${service}-advertisement` };
 }
@@ -217,7 +221,7 @@ async function handleUploadPack(reqBody, store, key) {
     contentType: "application/x-git-upload-pack-result"
   };
 }
-async function handleReceivePack(reqBody, store, key) {
+async function handleReceivePack(reqBody, store, key, { repack = false } = {}) {
   const { lines, next } = parsePktSection(reqBody);
   const packBytes = reqBody.subarray(next);
   const commands = lines.map((l) => {
@@ -240,6 +244,38 @@ async function handleReceivePack(reqBody, store, key) {
   let storedAt = null;
   for (let attempt = 0; attempt < 5; attempt++) {
     const { manifest, etag } = await loadManifest(store, key);
+    if (repack) {
+      const wrong = commands.filter((c) => c.newSha !== manifest.refs[c.ref]);
+      const missing = Object.keys(manifest.refs).filter((ref) => !commands.some((c) => c.ref === ref));
+      if (wrong.length > 0 || missing.length > 0) {
+        return report([
+          ...commands.map((c) => wrong.includes(c) ? `ng ${c.ref} repack must offer the store's current tip \u2014 fetch first
+` : `ng ${c.ref} not attempted
+`),
+          ...missing.map((ref) => `ng ${ref} repack must cover every ref
+`)
+        ]);
+      }
+      if (!packMeta) {
+        return report(commands.map((c) => `ng ${c.ref} repack carried no packfile
+`));
+      }
+      if (storedAt === null) {
+        storedAt = nextPackIndex(manifest);
+        while (!await store.putPack(storedAt, encryptedPack)) storedAt++;
+      }
+      const repacked = {
+        version: MANIFEST_VERSION,
+        refs: manifest.refs,
+        packs: [{ n: storedAt, ...packMeta }],
+        generation: manifest.generation + 1
+      };
+      if (await store.putRefs(await encryptManifest(key, repacked), etag)) {
+        return report(commands.map((c) => `ok ${c.ref}
+`));
+      }
+      continue;
+    }
     const stale = commands.filter((c) => (manifest.refs[c.ref] ?? ZERO_SHA) !== c.oldSha);
     if (stale.length > 0) {
       return report(commands.map((c) => stale.includes(c) ? `ng ${c.ref} fetch first
@@ -341,11 +377,11 @@ self.addEventListener("message", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  const m = url.pathname.match(/^\/egit\/([^/]+)\/(info\/refs|git-upload-pack|git-receive-pack)$/);
+  const m = url.pathname.match(/^\/egit\/([^/]+)\/(repack\/)?(info\/refs|git-upload-pack|git-receive-pack)$/);
   if (!m) return;
-  event.respondWith(handle(event.request, m[1], m[2], url));
+  event.respondWith(handle(event.request, m[1], m[3], url, { repack: !!m[2] }));
 });
-async function handle(request, repoId, endpoint, url) {
+async function handle(request, repoId, endpoint, url, options = {}) {
   try {
     const cfg = repos.get(repoId);
     if (!cfg) return new Response(`no key registered for repo ${repoId}`, { status: 403 });
@@ -353,11 +389,11 @@ async function handle(request, repoId, endpoint, url) {
     const store = makeStoreClient(cfg.base, repoId, cfg.headers);
     let out;
     if (endpoint === "info/refs") {
-      out = await handleInfoRefs(url.searchParams.get("service"), store, key);
+      out = await handleInfoRefs(url.searchParams.get("service"), store, key, options);
     } else {
       const body = new Uint8Array(await request.arrayBuffer());
       const handler = endpoint === "git-upload-pack" ? handleUploadPack : handleReceivePack;
-      out = await handler(body, store, key);
+      out = await handler(body, store, key, options);
     }
     return new Response(out.body, {
       status: 200,

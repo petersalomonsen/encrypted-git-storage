@@ -122,6 +122,15 @@ git-remote-egit --gc      <gateway>/store/<repoId>   # drop unreachable objects,
 git-remote-egit --prune   <gateway>/store/<repoId>   # sweep orphaned packs (age-guarded)
 ```
 
+A **merge push** can leave two packs holding the same object, and libgit2 — so
+every browser client — then refuses the merged pack upload-pack serves:
+`duplicate object <oid> found in pack`. From the CLI, `--gc` repairs a store in
+that state. In the browser there is no CLI, so the service worker serves a
+**repack** endpoint instead: point a remote at `…/egit/<repoId>/repack` and push
+the tip the store already has, and the store swaps its pack list for that one
+pack without moving a ref. Worth doing after any push that recorded a merge
+commit. See [Overlapping packs](./docs/design.md#overlapping-packs).
+
 ### Core primitives
 
 ```js

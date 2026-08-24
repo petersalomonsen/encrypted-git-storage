@@ -142,3 +142,81 @@ describe('receive-pack: pack-less pushes must not lose objects', () => {
         assert.equal(dv.getUint32(8), 2);
     });
 });
+
+describe('repack: rewrite the packs, move no ref', () => {
+    /** A store holding one ref and `packCount` packs, as append-only pushes leave it. */
+    async function storeWithPacks(packCount) {
+        const store = memStore();
+        await handleReceivePack(pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(2)), store, KEY);
+        for (let i = 1; i < packCount; i++) {
+            await handleReceivePack(pushBody([`${SHA_A} ${SHA_A} refs/heads/master`], fakePack(2, new Uint8Array([i]))), store, KEY);
+        }
+        return store;
+    }
+    const currentRefs = async (store) =>
+        new TextDecoder().decode((await handleInfoRefs('git-upload-pack', store, KEY)).body);
+
+    test('advertises no refs, so the client packs its whole history', async () => {
+        const store = await storeWithPacks(1);
+        const normal = new TextDecoder().decode((await handleInfoRefs('git-receive-pack', store, KEY)).body);
+        assert.match(normal, new RegExp(`${SHA_A} refs/heads/master`));
+
+        const repack = new TextDecoder().decode(
+            (await handleInfoRefs('git-receive-pack', store, KEY, { repack: true })).body);
+        assert.doesNotMatch(repack, /refs\/heads\/master/);
+        assert.match(repack, /capabilities\^\{\}/);
+    });
+
+    test('is a push, so there is nothing to fetch from it', async () => {
+        const store = await storeWithPacks(1);
+        await assert.rejects(
+            () => handleInfoRefs('git-upload-pack', store, KEY, { repack: true }),
+            /repack is a push/);
+    });
+
+    test('replaces every pack with the one pushed, leaving the ref where it was', async () => {
+        const store = await storeWithPacks(3);
+        assert.equal(store.state.packs.size, 3);
+
+        const res = await handleReceivePack(
+            pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(9, new Uint8Array([9, 9]))),
+            store, KEY, { repack: true });
+        assert.match(text(res), /ok refs\/heads\/master/);
+
+        // One referenced pack — the new one — and the ref is untouched.
+        assert.match(await currentRefs(store), new RegExp(`${SHA_A} refs/heads/master`));
+        const served = (await handleUploadPack(concatBytes(pktLines([`want ${SHA_A}\n`, 'done']), FLUSH), store, KEY)).body;
+        const dv = new DataView(served.buffer, served.byteOffset + pktLine('NAK\n').length);
+        assert.equal(dv.getUint32(8), 9, 'upload-pack now serves only the repacked pack');
+
+        // The superseded packs are still THERE, just unreferenced: pruneOrphans
+        // sweeps them later, which is what makes a bad repack recoverable.
+        assert.equal(store.state.packs.size, 4);
+    });
+
+    test('refuses a tip the store does not currently hold', async () => {
+        const store = await storeWithPacks(2);
+        const res = await handleReceivePack(
+            pushBody([`${ZEROS} ${SHA_B} refs/heads/master`], fakePack(9)), store, KEY, { repack: true });
+        assert.match(text(res), /ng refs\/heads\/master repack must offer the store's current tip/);
+        assert.equal(store.state.packs.size, 2, 'nothing swapped');
+        assert.match(await currentRefs(store), new RegExp(`${SHA_A} refs/heads/master`));
+    });
+
+    test('refuses to drop a ref it was not offered', async () => {
+        const store = await storeWithPacks(1);
+        await handleReceivePack(pushBody([`${ZEROS} ${SHA_B} refs/heads/other`], fakePack(2)), store, KEY);
+        const res = await handleReceivePack(
+            pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(9)), store, KEY, { repack: true });
+        assert.match(text(res), /ng refs\/heads\/other repack must cover every ref/);
+        assert.match(await currentRefs(store), new RegExp(`${SHA_B} refs/heads/other`));
+    });
+
+    test('refuses a repack that carries no pack — that would empty the store', async () => {
+        const store = await storeWithPacks(2);
+        const res = await handleReceivePack(
+            pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], null), store, KEY, { repack: true });
+        assert.match(text(res), /ng refs\/heads\/master repack carried no packfile/);
+        assert.equal(store.state.packs.size, 2);
+    });
+});

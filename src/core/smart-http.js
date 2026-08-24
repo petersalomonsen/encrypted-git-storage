@@ -7,19 +7,50 @@
 //   POST .../git-upload-pack     (fetch/clone: wants/haves -> NAK + one packfile)
 //   POST .../git-receive-pack    (push: ref commands + packfile -> report-status)
 //
+// The two push endpoints also serve a REPACK ({ repack: true }) — which exists
+// because of what upload-pack does; see "Overlapping packs" below.
+//
 // Deliberate simplifications, safe for a dumb single-manifest store:
 //  - No capabilities that change framing (no side-band, no multi_ack, no v2):
 //    clients fall back to the plainest v0 exchange.
-//  - upload-pack ignores haves and serves ALL packs merged into one (packcat) —
-//    correct, if not minimal; fine for the repo sizes this store targets.
+//  - upload-pack ignores haves and serves ALL packs merged into one (packcat).
 //  - receive-pack requires each command's old-sha to match the manifest exactly
 //    (the client already did the fast-forward ancestry check against our ref
 //    advertisement); the refs-manifest CAS makes concurrent pushes safe.
 //
+// Overlapping packs
+// -----------------
+// Merging every pack into one is valid only while no object is in two of them,
+// and nothing guarantees that: a client pushing a MERGE commit re-sends the
+// subtrees and blobs its merged tree shares with the side the store already
+// holds. From then on the merged pack carries the same object twice.
+//
+// The git CLI indexes such a pack without complaining. libgit2 — i.e. wasm-git,
+// this store's whole reason to exist — refuses it:
+//
+//     duplicate object <oid> found in pack
+//
+// and because a failed fetch never creates the remote-tracking ref, the client
+// reports the confusing pair "revspec 'origin/master' not found" and then a
+// rejected push. One merge push and no browser can read the store again.
+// (Diagnosed on a real store: 89 objects in two packs, all from one merge push.
+// The CLI tests never saw it because the CLI does not care.)
+//
+// Nothing here can drop the duplicate: telling two copies apart needs each
+// object's id, which needs the deltas resolved, which is index-pack — not
+// something a service worker carries. So the fix is to stop the store
+// accumulating overlapping packs, and the one participant that can build a
+// clean pack is the client, which has a real git. That is what a repack is:
+// the client is told the store has no refs, so it builds a COMPLETE pack, and
+// the store swaps its pack list for that one pack while leaving every ref
+// exactly where it was. Refs never move, so a repack cannot lose history, and
+// the packs it supersedes are left for pruneOrphans (core/maintenance.js)
+// rather than deleted, so a bad one is still recoverable.
+//
 // Env-agnostic: pass a store client (core/store-client.js) + raw key bytes.
 
 import { encrypt, decrypt, sha256hex } from './crypto.js';
-import { nextPackIndex, advanceManifest, packsInOrder } from './format.js';
+import { MANIFEST_VERSION, nextPackIndex, advanceManifest, packsInOrder } from './format.js';
 import { loadManifest, encryptManifest } from './manifest-io.js';
 import { pktLine, pktLines, parsePktSection, concatBytes, FLUSH } from './pktline.js';
 import { concatPacks, packObjectCount } from './packcat.js';
@@ -56,13 +87,22 @@ function advertisement(manifest, service) {
     return lines;
 }
 
-/** GET info/refs?service=... -> { body, contentType } */
-export async function handleInfoRefs(service, store, key) {
+/**
+ * GET info/refs?service=... -> { body, contentType }
+ *
+ * @param {{repack?: boolean}} [options] repack: advertise NO refs, so the client
+ *   packs its whole history instead of an increment. Push only.
+ */
+export async function handleInfoRefs(service, store, key, { repack = false } = {}) {
     if (!CAPS[service]) throw new Error(`unsupported service: ${service}`);
+    if (repack && service !== 'git-receive-pack') {
+        throw new Error(`repack is a push: ${service} is not available on it`);
+    }
     const { manifest } = await loadManifest(store, key);
+    const advertised = repack ? { ...manifest, refs: {} } : manifest;
     const body = concatBytes(
         pktLine(`# service=${service}\n`), FLUSH,
-        pktLines(advertisement(manifest, service)),
+        pktLines(advertisement(advertised, service)),
     );
     return { body, contentType: `application/x-${service}-advertisement` };
 }
@@ -100,7 +140,7 @@ export async function handleUploadPack(reqBody, store, key) {
 }
 
 /** POST git-receive-pack -> { body, contentType } */
-export async function handleReceivePack(reqBody, store, key) {
+export async function handleReceivePack(reqBody, store, key, { repack = false } = {}) {
     const { lines, next } = parsePktSection(reqBody);
     const packBytes = reqBody.subarray(next);
     // "<old-sha> <new-sha> <refname>" (first line carries \0capabilities — drop them)
@@ -133,6 +173,45 @@ export async function handleReceivePack(reqBody, store, key) {
 
     for (let attempt = 0; attempt < 5; attempt++) {
         const { manifest, etag } = await loadManifest(store, key);
+
+        if (repack) {
+            // The client was told the store has no refs, so it offers to CREATE
+            // every ref at the sha the store already holds. Anything else — a
+            // different sha, a ref the store does not have, a ref left out — is
+            // not a repack, and taking it would move a ref on the strength of an
+            // advertisement that was deliberately a fiction. Refuse instead.
+            const wrong = commands.filter(c => c.newSha !== manifest.refs[c.ref]);
+            const missing = Object.keys(manifest.refs).filter(ref => !commands.some(c => c.ref === ref));
+            if (wrong.length > 0 || missing.length > 0) {
+                return report([
+                    ...commands.map(c => wrong.includes(c)
+                        ? `ng ${c.ref} repack must offer the store's current tip — fetch first\n`
+                        : `ng ${c.ref} not attempted\n`),
+                    ...missing.map(ref => `ng ${ref} repack must cover every ref\n`),
+                ]);
+            }
+            if (!packMeta) {
+                return report(commands.map(c => `ng ${c.ref} repack carried no packfile\n`));
+            }
+
+            if (storedAt === null) {
+                storedAt = nextPackIndex(manifest);
+                while (!(await store.putPack(storedAt, encryptedPack))) storedAt++;
+            }
+            // Refs unchanged: a repack rewrites storage, never history. The
+            // superseded packs are left in place for pruneOrphans to sweep,
+            // so this is reversible for as long as that window lasts.
+            const repacked = {
+                version: MANIFEST_VERSION,
+                refs: manifest.refs,
+                packs: [{ n: storedAt, ...packMeta }],
+                generation: manifest.generation + 1,
+            };
+            if (await store.putRefs(await encryptManifest(key, repacked), etag)) {
+                return report(commands.map(c => `ok ${c.ref}\n`));
+            }
+            continue; // CAS lost to a concurrent push — re-validate and retry
+        }
 
         // Every command's old-sha must match the manifest (zeros = must not exist).
         const stale = commands.filter(c => (manifest.refs[c.ref] ?? ZERO_SHA) !== c.oldSha);
