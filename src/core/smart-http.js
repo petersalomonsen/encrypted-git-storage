@@ -117,14 +117,21 @@ export async function handleUploadPack(reqBody, store, key) {
         off = section.next;
     }
     const done = lines.some(l => l === 'done');
-    const wants = lines.filter(l => l.startsWith('want '));
 
     // Pure negotiation round (no done yet): keep NAKing until the client gives up
     // adding haves — we always send the full history anyway.
     if (!done) {
         return { body: pktLine('NAK\n'), contentType: 'application/x-git-upload-pack-result' };
     }
-    if (wants.length === 0) throw new Error('upload-pack: no wants');
+
+    // The want list is deliberately not checked. A negotiation spans several
+    // POSTs and only the FIRST carries the wants: once the client stops adding
+    // wants it sends the next batch of `have`s plus `done`, and nothing else.
+    // Rejecting that round for "no wants" turned it into a 500 whose body git
+    // read as a packfile — reported as "bad packet length", from the client's
+    // point of view an unreadable store. It only bit a client with enough local
+    // history to need a second round, so clones always worked and fetches from a
+    // device that had committed locally did not.
 
     const { manifest } = await loadManifest(store, key);
     const packs = [];

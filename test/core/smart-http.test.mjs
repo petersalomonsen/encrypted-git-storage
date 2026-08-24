@@ -220,3 +220,45 @@ describe('repack: rewrite the packs, move no ref', () => {
         assert.equal(store.state.packs.size, 2);
     });
 });
+
+describe('upload-pack negotiation spanning several POSTs', () => {
+    /** A store holding one ref and one pack. */
+    async function seeded() {
+        const store = memStore();
+        await handleReceivePack(pushBody([`${ZEROS} ${SHA_A} refs/heads/master`], fakePack(4)), store, KEY);
+        return store;
+    }
+    const packOf = (res) => {
+        const nak = pktLine('NAK\n').length;
+        if (res.body.length <= nak) return null;
+        const dv = new DataView(res.body.buffer, res.body.byteOffset + nak);
+        return { magic: dv.getUint32(0), objects: dv.getUint32(8) };
+    };
+
+    test('a first round with wants but no done is NAKed', async () => {
+        const store = await seeded();
+        const body = concatBytes(pktLines([`want ${SHA_A}\n`, `have ${SHA_B}\n`]), FLUSH);
+        const res = await handleUploadPack(body, store, KEY);
+        assert.match(text(res), /NAK/);
+        assert.equal(packOf(res), null, 'no pack until the client says done');
+    });
+
+    test('a CONTINUATION round carries only haves and done — and must still be served', async () => {
+        const store = await seeded();
+        // Exactly what libgit2 sends once it stops adding wants. Rejecting this
+        // for having no wants produced a 500, which git reads as a packfile and
+        // reports as "bad packet length".
+        const body = concatBytes(pktLines([`have ${SHA_B}\n`]), pktLine('done\n'));
+        const res = await handleUploadPack(body, store, KEY);
+        const pack = packOf(res);
+        assert.ok(pack, 'the continuation round must get the packfile');
+        assert.equal(pack.magic, 0x5041434b);
+        assert.equal(pack.objects, 4);
+    });
+
+    test('done with no haves and no wants is still served (nothing left to negotiate)', async () => {
+        const store = await seeded();
+        const res = await handleUploadPack(pktLine('done\n'), store, KEY);
+        assert.ok(packOf(res), 'done means send it');
+    });
+});

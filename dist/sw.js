@@ -204,11 +204,9 @@ async function handleUploadPack(reqBody, store, key) {
     off = section.next;
   }
   const done = lines.some((l) => l === "done");
-  const wants = lines.filter((l) => l.startsWith("want "));
   if (!done) {
     return { body: pktLine("NAK\n"), contentType: "application/x-git-upload-pack-result" };
   }
-  if (wants.length === 0) throw new Error("upload-pack: no wants");
   const { manifest } = await loadManifest(store, key);
   const packs = [];
   for (const p of packsInOrder(manifest)) {
