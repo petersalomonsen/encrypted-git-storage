@@ -13,7 +13,8 @@
 // Deliberate simplifications, safe for a dumb single-manifest store:
 //  - No capabilities that change framing (no side-band, no multi_ack, no v2):
 //    clients fall back to the plainest v0 exchange.
-//  - upload-pack ignores haves and serves ALL packs merged into one (packcat).
+//  - upload-pack ignores haves and serves ALL packs merged into one, every
+//    object once (packcat mergePacks).
 //  - receive-pack requires each command's old-sha to match the manifest exactly
 //    (the client already did the fast-forward ancestry check against our ref
 //    advertisement); the refs-manifest CAS makes concurrent pushes safe.
@@ -21,31 +22,30 @@
 // Overlapping packs
 // -----------------
 // Merging every pack into one is valid only while no object is in two of them,
-// and nothing guarantees that: a client pushing a MERGE commit re-sends the
-// subtrees and blobs its merged tree shares with the side the store already
-// holds. From then on the merged pack carries the same object twice.
+// and nothing guarantees that. libgit2 and git both hide only what the remote
+// TIP holds when they build a push, so a push re-sends any object an OLDER
+// commit already stored: a merge commit re-sends the subtrees its tree shares
+// with the other side, and an ordinary commit that brings a file back to an
+// earlier content re-sends that blob and the trees above it. (Both seen on a
+// real store: 89 duplicates from one merge push; later 10 more from two plain
+// single-commit pushes after an auto-merge had changed some files.)
 //
-// The git CLI indexes such a pack without complaining. libgit2 — i.e. wasm-git,
-// this store's whole reason to exist — refuses it:
+// The git CLI indexes a pack with duplicates without complaining. libgit2 —
+// i.e. wasm-git, this store's whole reason to exist — refuses it:
 //
 //     duplicate object <oid> found in pack
 //
-// and because a failed fetch never creates the remote-tracking ref, the client
-// reports the confusing pair "revspec 'origin/master' not found" and then a
-// rejected push. One merge push and no browser can read the store again.
-// (Diagnosed on a real store: 89 objects in two packs, all from one merge push.
-// The CLI tests never saw it because the CLI does not care.)
+// and a failed clone leaves nothing behind, so a new device gets an empty
+// repository. So upload-pack serves mergePacks: it indexes the packs
+// (core/packindex.js — object ids need the deltas resolved, done in plain JS)
+// and leaves out every later copy. Nothing stored changes; the store is read
+// correctly however many duplicates it has accumulated.
 //
-// Nothing here can drop the duplicate: telling two copies apart needs each
-// object's id, which needs the deltas resolved, which is index-pack — not
-// something a service worker carries. So the fix is to stop the store
-// accumulating overlapping packs, and the one participant that can build a
-// clean pack is the client, which has a real git. That is what a repack is:
-// the client is told the store has no refs, so it builds a COMPLETE pack, and
-// the store swaps its pack list for that one pack while leaving every ref
-// exactly where it was. Refs never move, so a repack cannot lose history, and
-// the packs it supersedes are left for pruneOrphans (core/maintenance.js)
-// rather than deleted, so a bad one is still recoverable.
+// A REPACK still exists: the client is told the store has no refs, so it
+// builds a COMPLETE pack, and the store swaps its pack list for that one pack
+// while leaving every ref exactly where it was. It shrinks a store, but is no
+// longer needed to make one readable. The packs it supersedes are left for
+// pruneOrphans (core/maintenance.js) rather than deleted.
 //
 // Env-agnostic: pass a store client (core/store-client.js) + raw key bytes.
 
@@ -53,7 +53,7 @@ import { encrypt, decrypt, sha256hex } from './crypto.js';
 import { MANIFEST_VERSION, nextPackIndex, advanceManifest, packsInOrder } from './format.js';
 import { loadManifest, encryptManifest } from './manifest-io.js';
 import { pktLine, pktLines, parsePktSection, concatBytes, FLUSH } from './pktline.js';
-import { concatPacks, packObjectCount } from './packcat.js';
+import { mergePacks, packObjectCount } from './packcat.js';
 
 const ZERO_SHA = '0'.repeat(40);
 const CAPS = {
@@ -107,8 +107,13 @@ export async function handleInfoRefs(service, store, key, { repack = false } = {
     return { body, contentType: `application/x-${service}-advertisement` };
 }
 
-/** POST git-upload-pack -> { body, contentType } */
-export async function handleUploadPack(reqBody, store, key) {
+/**
+ * POST git-upload-pack -> { body, contentType }
+ *
+ * @param {{indexCache?: object}} [options] indexCache: see mergePacks — lets a
+ *   long-lived client (the service worker) skip re-indexing packs it has seen.
+ */
+export async function handleUploadPack(reqBody, store, key, { indexCache = null } = {}) {
     // Read every pkt section; wants/haves/done can span several of them.
     const lines = [];
     for (let off = 0; off < reqBody.length;) {
@@ -135,11 +140,12 @@ export async function handleUploadPack(reqBody, store, key) {
 
     const { manifest } = await loadManifest(store, key);
     const packs = [];
+    const packIds = [];
     for (const p of packsInOrder(manifest)) {
         const pack = await decrypt(key, await store.getPack(p.n));
-        if (packObjectCount(pack) > 0) packs.push(pack);
+        if (packObjectCount(pack) > 0) { packs.push(pack); packIds.push(p.sha); }
     }
-    const merged = await concatPacks(packs);
+    const merged = await mergePacks(packs, { packIds, indexCache });
     return {
         body: concatBytes(pktLine('NAK\n'), merged),
         contentType: 'application/x-git-upload-pack-result',

@@ -36,6 +36,28 @@ import { makeStoreClient } from '../core/store-client.js';
 
 const repos = new Map(); // repoId -> { key: Uint8Array(32), base: string, headers: object }
 
+// Serving a fetch means indexing every pack to leave out duplicate objects
+// (core/packindex.js) — seconds for a big store, and a pack's index never
+// changes. Remember each one in this origin's Cache Storage, by repo and the
+// pack's sha256, so a sync only indexes packs this browser has not seen. It
+// holds object ids and offsets — no content, and nothing the browser's own
+// copy of the repository does not already show.
+const INDEX_CACHE = 'egit-pack-index-v1';
+function indexCacheFor(repoId) {
+    const url = (id) => `${self.location.origin}/__egit_pack_index/${encodeURIComponent(repoId)}/${id}`;
+    return {
+        async get(id) {
+            const res = await (await caches.open(INDEX_CACHE)).match(url(id));
+            return res ? res.json() : null;
+        },
+        async put(id, index) {
+            await (await caches.open(INDEX_CACHE)).put(url(id), new Response(JSON.stringify(index), {
+                headers: { 'content-type': 'application/json' },
+            }));
+        },
+    };
+}
+
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
@@ -76,7 +98,9 @@ async function handle(request, repoId, endpoint, url, options = {}) {
         } else {
             const body = new Uint8Array(await request.arrayBuffer());
             const handler = endpoint === 'git-upload-pack' ? handleUploadPack : handleReceivePack;
-            out = await handler(body, store, key, options);
+            out = await handler(body, store, key, endpoint === 'git-upload-pack'
+                ? { ...options, indexCache: self.caches ? indexCacheFor(repoId) : null }
+                : options);
         }
         return new Response(out.body, {
             status: 200,

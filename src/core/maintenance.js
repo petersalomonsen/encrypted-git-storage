@@ -6,8 +6,8 @@
 // still only ever sees ciphertext:
 //
 //  - compact(): merge every referenced pack into ONE (core/packcat.js — no git
-//    needed, so this also runs in the browser). Keeps all objects, including
-//    unreachable ones; it shrinks pack COUNT and per-object overhead only.
+//    needed, so this also runs in the browser), every object once. Keeps
+//    unreachable objects; it shrinks pack COUNT and drops duplicate copies.
 //  - replacePacks(build): the CAS-safe swap loop compact() is built on. A CLI
 //    with real git can pass a reachability-aware builder instead (the remote
 //    helper's --gc does: replay packs into a scratch repo, `git pack-objects`
@@ -25,7 +25,7 @@
 import { encrypt, decrypt, sha256hex } from './crypto.js';
 import { MANIFEST_VERSION, nextPackIndex, packsInOrder } from './format.js';
 import { loadManifest, encryptManifest } from './manifest-io.js';
-import { concatPacks, packObjectCount } from './packcat.js';
+import { mergePacks, packObjectCount } from './packcat.js';
 
 /**
  * Replace ALL referenced packs with one rebuilt pack, without losing concurrent
@@ -75,7 +75,7 @@ export async function compact(store, key) {
         const size = manifest.packs[0]?.size ?? 0;
         return { packsBefore: manifest.packs.length, packsAfter: manifest.packs.length, bytesBefore: size, bytesAfter: size };
     }
-    return replacePacks(store, key, (_manifest, packs) => concatPacks(packs));
+    return replacePacks(store, key, (_manifest, packs) => mergePacks(packs));
 }
 
 /**
