@@ -5,6 +5,7 @@ export * from './crypto.js';        // encrypt, decrypt, isEncrypted, sha256hex
 export * from './format.js';        // manifest shape + push helpers
 export * from './pktline.js';       // git pkt-line framing (protocol v0)
 export * from './packcat.js';       // merge append-only packs into one valid pack
+export * from './packindex.js';     // object ids of pack records (dedupe across packs)
 export * from './store-client.js';  // makeStoreClient (gateway object endpoints)
 export * from './manifest-io.js';   // loadManifest / encryptManifest
 export * from './smart-http.js';    // handleInfoRefs / handleUploadPack / handleReceivePack

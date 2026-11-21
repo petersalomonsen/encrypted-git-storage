@@ -23,11 +23,13 @@ jobs:
 
       # MinIO as an S3-compatible object store. Run via docker (so we can pass the
       # `server /data` command, which GitHub `services:` can't) and wait for ready.
+      # MinIO no longer publishes minio/minio on Docker Hub (pulls are denied
+      # since late 2025); Chainguard's build is the same server, still public.
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=$S3_ACCESS_KEY -e MINIO_ROOT_PASSWORD=$S3_SECRET_KEY \
-            minio/minio server /data
+            cgr.dev/chainguard/minio:latest server /data
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:9000/minio/health/ready >/dev/null 2>&1; then
               echo "MinIO ready"; break

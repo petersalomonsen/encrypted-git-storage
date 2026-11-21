@@ -58,8 +58,9 @@ Two transports, one store, shared `src/core`:
     and a fresh SHA-1. OFS_DELTA offsets survive (relative, section-local) and
     REF_DELTA thin bases appear earlier in the merged stream, so the result is
     self-contained — verified against `git index-pack --strict` in a bare repo.
-    It is only a *valid* pack while no object is in two packs, which a merge push
-    breaks; see **Overlapping packs** below.
+    That is only a *valid* pack while no object is in two packs, which pushes
+    break, so upload-pack serves `mergePacks`, which leaves out every later
+    copy; see **Overlapping packs** below.
   - *receive-pack:* store the pushed pack encrypted, check each command's
     old-sha against the manifest, CAS the refs manifest (retry loop).
   - *repack* (`{ repack: true }`, served at `…/<repoId>/repack/…`): the same two
@@ -70,34 +71,50 @@ Two transports, one store, shared `src/core`:
 ### Overlapping packs
 
 Merging every pack into one is valid only while the packs are disjoint, and
-nothing guarantees that. A client pushing a **merge commit** re-sends the
-subtrees and blobs its merged tree shares with the side the store already holds
-(libgit2 hides the advertised refs' commits, not every object reachable from
-them). From then on the merged pack carries the same object twice.
+nothing guarantees that. libgit2 and git both hide only what the advertised
+refs' commits hold when they build a push, not every object reachable from
+them. So a push re-sends any object an *older* commit already stored:
 
-The git CLI indexes such a pack without complaining. **libgit2 — i.e. wasm-git,
-this library's primary client — refuses it:**
+- a **merge commit** re-sends the subtrees and blobs its merged tree shares
+  with the side the store already holds;
+- an **ordinary commit** that brings a file back to content an older commit had
+  re-sends that blob and the trees above it. No merge is needed: two devices
+  whose auto-merge changed a file, and a later commit restoring it, are enough.
+
+Seen on a real store: 89 duplicates from one merge push; later 10 more from two
+plain single-commit pushes.
+
+The git CLI indexes a pack with duplicates without complaining. **libgit2 — i.e.
+wasm-git, this library's primary client — refuses it:**
 
 ```
 duplicate object <oid> found in pack
 ```
 
-and because a failed fetch never creates the remote-tracking ref, the client
-reports the confusing pair `revspec 'origin/master' not found` and then a
-rejected push. One merge push and no browser can read the store again. (Seen on
-a real store: 89 objects in two packs, all from a single merge push. The CLI
-tests never caught it because the CLI does not care.)
+A failed fetch never creates the remote-tracking ref, so the client then reports
+`revspec 'origin/master' not found` and a rejected push; a failed **clone**
+leaves nothing behind, so a new device gets an empty repository.
 
-The service worker cannot drop the duplicate: telling two copies apart needs
-each object's id, which needs the deltas resolved — that is `index-pack`, not
-something a SW carries. So the store must not accumulate overlapping packs, and
-the only participant that can build a clean pack is the client, which has a real
-git. That is what a **repack** is: tell the client the store has no refs so it
-builds a complete pack, then swap the pack list for it. Refs never move, so a
-repack cannot lose history; superseded packs are left for **prune** rather than
-deleted, so a bad one is recoverable. A client should run one after any push
-that recorded a merge commit — it is then certainly at the store's tip, which
-the endpoint requires.
+So upload-pack serves `mergePacks` (`core/packcat.js`): it indexes the packs
+(`core/packindex.js` — its own inflater, since the pack records no lengths and
+`DecompressionStream` cannot say how much input it used; delta resolution;
+SHA-1) and keeps the first copy of each object. A pack that loses a record has
+its `OFS_DELTA`s rewritten as `REF_DELTA`s naming the base by id, because their
+distances may now span a gap or point at the dropped copy; the delta data is
+unchanged. Packs that lose nothing pass through byte for byte, and a single pack
+is never indexed. Nothing stored changes.
+
+Indexing is the expensive part (every version of every file is rebuilt to be
+hashed: about 3.5 s in Node and 8 s in Chromium for a 120 MB store), and a
+pack's index never changes. So `mergePacks` takes an `indexCache`; the service
+worker backs it with Cache Storage, keyed by repo and the manifest's sha256 of
+the pack, and a cached index is used only if its record count matches the pack.
+A device then indexes only packs it has not seen.
+
+A **repack** still exists: tell the client the store has no refs so it builds a
+complete pack, then swap the pack list for it. Refs never move, so a repack
+cannot lose history; superseded packs are left for **prune** rather than
+deleted. It shrinks a store; it is no longer needed to make one readable.
 
 `test/gateway` drives the exact same smart-HTTP handlers with the real git CLI
 through a small node adapter — protocol bugs reproduce there without a browser.
@@ -143,9 +160,8 @@ fix this (`core/maintenance.js`; the backend still only sees ciphertext):
   is also what eventually sweeps the packs a **repack** supersedes.
 - **repack** — not a maintenance op but a push, because the work (building one
   clean pack) needs a real git: the client pushes its tip to `…/<repoId>/repack`
-  and the store swaps its pack list for that pack, refs untouched. Unlike
-  compact, it removes duplicate objects — the one thing that makes upload-pack's
-  merged pack unreadable to libgit2 (see **Overlapping packs**).
+  and the store swaps its pack list for that pack, refs untouched. Compact also
+  drops duplicate objects now (it uses `mergePacks`), but keeps unreachable ones.
 
 Both compact and gc go through a CAS-safe swap (`replacePacks`): write the merged
 pack at a fresh index, CAS the manifest to reference only it, THEN delete the
